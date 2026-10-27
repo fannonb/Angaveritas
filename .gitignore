@@ -1,0 +1,16 @@
+node_modules
+.next
+.next-workflow
+.next-production
+test-results
+.env
+.env.local
+*.tsbuildinfo
+next-env.d.ts
+
+# Uploaded files (local storage driver)
+/storage
+/.superdesign/
+
+# Local login details
+ACCESS.md
