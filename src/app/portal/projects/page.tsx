@@ -1,3 +1,4 @@
+import { briefProfile, briefStageLabels } from '@/lib/service-briefs'
 import Link from 'next/link'
 import { EmptyState, HealthChip, ProjectMap, RequestChip, StageChip } from '@/components/app/bits'
 import { fmtDate, kes } from '@/components/app/format'
@@ -54,7 +55,7 @@ export default async function ProjectsPage() {
                             <Link href={`/portal/projects/${p.code}`} className="font-semibold">{p.title}</Link>
                             <span className="block text-xs text-muted"><span className="font-mono">{p.code}</span>{p.location_label ? ` · ${p.location_label}` : ''}</span>
                           </td>
-                          <td><StageChip stage={p.stage} client /></td>
+                          <td><StageChip stage={p.stage} client label={briefStageLabels(briefProfile(p))[p.stage]} /></td>
                           <td><HealthChip health={p.health} /></td>
                           <td className="dim">{p.next_inspection ? fmtDate(p.next_inspection, user.timezone) : '—'}</td>
                           <td className="dim">{p.published_reports}</td>

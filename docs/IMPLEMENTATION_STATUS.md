@@ -39,7 +39,7 @@ The original analysis remains a historical baseline; it should not be read as th
 
 ## External service framework
 
-- M-Pesa/card: gateway interfaces and authenticated client checkout route exist. Checkout and callbacks return unavailable until provider-specific initiation, callback verification and transactional reconciliation are wired and tested. Merchant credentials, sandbox/UAT and provider adapters remain required.
+- Paystack: hosted KES deposit/balance checkout, signed webhook storage, independent server verification, idempotent ledger reconciliation, dashboard refund synchronization, receipt retry and staff review screens are implemented. Merchant configuration, webhook/worker setup and live card/M-Pesa validation remain required. See `PAYSTACK.md`. Automatic recurring collection is not included.
 - Email: Resend delivery and retry worker exist. Actual delivery requires a sender/API key and a scheduled worker.
 - Consultation booking and WhatsApp contact: configure the public environment settings. Automated WhatsApp/SMS messaging is not implemented.
 - Malware scanning: optionally configure a compatible scanner. Signature checks alone do not provide antivirus assurance.

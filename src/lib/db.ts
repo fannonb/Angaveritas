@@ -11,7 +11,9 @@ export const sql =
   postgres(process.env.DATABASE_URL ?? '', {
     prepare: false,
     max: Number(process.env.DB_POOL_MAX ?? 3),
-    idle_timeout: 20,
+    // On Vercel a suspended function can wake holding sockets the pooler has already closed,
+    // so idle connections are dropped almost at once there; locally they are kept for reuse.
+    idle_timeout: process.env.VERCEL ? 1 : 20,
     connect_timeout: 10,
     onnotice: () => {},
     types: { calendarDate: calendarDateType },

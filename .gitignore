@@ -2,6 +2,9 @@ node_modules
 .next
 .next-workflow
 .next-production
+.next-accounts
+.next-paystack
+.tmp-paystack
 test-results
 .env
 .env.local
@@ -14,3 +17,5 @@ next-env.d.ts
 
 # Local login details
 ACCESS.md
+.vercel
+.env*

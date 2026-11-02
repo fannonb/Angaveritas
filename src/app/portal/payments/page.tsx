@@ -7,6 +7,8 @@ import Pager from '@/components/app/Pager'
 import { requireClient } from '@/lib/auth/session'
 import { clientPayments, type InvoiceStatus } from '@/lib/data/payments'
 import { site } from '@/lib/site'
+import PaystackInvoiceActions from '@/components/app/PaystackInvoiceActions'
+import { paystackEnabled } from '@/lib/paystack'
 
 export const metadata = { title: 'Payments' }
 
@@ -131,16 +133,20 @@ export default async function PaymentsPage({ searchParams }: { searchParams: Pro
             {owing.length > 0 && (
               <section className="panel panel-pad space-y-3" aria-labelledby="how-to-pay">
                 <h2 id="how-to-pay" className="text-lg">How to pay</h2>
+                {paystackEnabled() && owing.map(i => <div key={i.id} className="rounded border border-line p-3 space-y-2">
+                  <Link className="font-semibold text-sm" href={`/portal/projects/${i.project_code}/invoices/${i.id}`}>{i.code}</Link>
+                  <PaystackInvoiceActions invoiceId={i.id} balance={i.owed_kes} depositDue={Math.max(0,i.deposit_kes-i.paid_kes)} />
+                </div>)}
                 <p className="text-ink-2">
                   Pay <strong className="text-ink">{kes(totals.owed)}</strong> across {plural(owing.length, 'invoice', 'invoices')}. Use the invoice number as your payment reference.
                 </p>
                 {site.payment.mpesaPaybill && <p className="text-sm">M-Pesa Paybill <strong>{site.payment.mpesaPaybill}</strong>, account = invoice number</p>}
                 {site.payment.bankDetails && <p className="text-sm">Bank transfer: {site.payment.bankDetails}</p>}
-                {!site.payment.mpesaPaybill && !site.payment.bankDetails && (
+                {!paystackEnabled() && !site.payment.mpesaPaybill && !site.payment.bankDetails && (
                   <p className="text-sm text-ink-2">Your analyst will send payment details. Pay only through official AngaVeritas channels.</p>
                 )}
                 <p className="text-sm text-ink-2">
-                  After paying, send the transaction reference from the project&apos;s Payments tab, so the team can confirm the funds.
+                  Portal checkout payments are confirmed automatically. For payments made outside checkout, send the transaction reference from the project&apos;s Payments tab so the team can confirm the funds.
                 </p>
                 {firstOwing && <Link className="btn btn-primary btn-small" href={`/portal/projects/${firstOwing.project_code}?tab=operations`}>Send a payment reference</Link>}
               </section>

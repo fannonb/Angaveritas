@@ -1,5 +1,6 @@
 import 'server-only'
 import crypto from 'node:crypto'
+import { sql } from '@/lib/db'
 
 export function clientIp(req: Request) {
   const fwd = req.headers.get('x-forwarded-for')
@@ -25,10 +26,30 @@ export function sameOrigin(req: Request) {
   }
 }
 
-// Simple per-instance limiter for the lookup endpoints (protects the free
-// OpenStreetMap services from abuse). Submissions are limited in the database.
+// Limiter for the lookup endpoints (protects the free OpenStreetMap services
+// from abuse). Counts are shared through the database so they hold across
+// server instances; if the database is unreachable, each instance counts on
+// its own rather than refusing every visitor.
+export async function rateLimited(key: string, limit: number, windowMs: number) {
+  try {
+    const [row] = await sql<{ count: number }[]>`
+      insert into rate_limits (key, count, reset_at) values (${key}, 1, now() + make_interval(secs => ${windowMs / 1000}))
+      on conflict (key) do update set
+        count = case when rate_limits.reset_at < now() then 1 else rate_limits.count + 1 end,
+        reset_at = case when rate_limits.reset_at < now() then excluded.reset_at else rate_limits.reset_at end
+      returning count`
+    return row.count > limit
+  } catch {
+    return rateLimitedLocally(key, limit, windowMs)
+  }
+}
+
+export async function removeExpiredRateLimits() {
+  await sql`delete from rate_limits where reset_at < now() - interval '1 hour'`
+}
+
 const buckets = new Map<string, { count: number; reset: number }>()
-export function rateLimited(key: string, limit: number, windowMs: number) {
+function rateLimitedLocally(key: string, limit: number, windowMs: number) {
   const now = Date.now()
   const b = buckets.get(key)
   if (!b || b.reset < now) {

@@ -1,5 +1,6 @@
 'use server'
 
+import { briefProfile } from '@/lib/service-briefs'
 import { revalidatePath } from 'next/cache'
 import { redirect } from 'next/navigation'
 import { logEvent, notifyTeam, notifyUser } from '@/lib/activity'
@@ -261,6 +262,8 @@ export async function updateProjectAction(_: StaffState, form: FormData): Promis
   const title = formText(form, 'title', 140)
   if (!title) return { error: 'Title is required.' }
   if (str(form,'paymentStatus') !== p.payment_status && !formText(form,'paymentNote',1000)) return {error:'Record a payment reference or waiver reason when changing payment status.'}
+  // A waiver releases the reports without money received, so it needs an admin, not the analyst running the project.
+  if (str(form,'paymentStatus') !== p.payment_status && (str(form,'paymentStatus') === 'waived' || p.payment_status === 'waived') && user.role !== 'admin') return {error:'Only an admin can waive payment or lift a waiver.'}
   if (stage === 'closed' && p.stage !== 'closed' && form.get('closeWithBalance') !== 'on' && str(form,'paymentStatus') !== 'waived') {
     const owed = (await unpaidInvoices(p.id)).reduce((s, u) => s + u.unpaid_kes, 0)
     if (owed > 0) return {error:`KES ${owed.toLocaleString('en-US')} is still unpaid on this project. Record the payment, cancel the invoice, or tick the box to close it anyway.`}
@@ -392,8 +395,8 @@ export async function createInspectionAction(form: FormData) {
   const objectives = formText(form, 'objectives', 8000) ?? (p.claims ? `Verify:\n${p.claims}` : null)
   const siteId = /^[0-9a-f-]{36}$/i.test(str(form,'siteId')) ? str(form,'siteId') : null
   const insp = await createInspection(p.id, { title, scheduledFor, agentId, objectives,siteId }, user.id)
-  await logEvent({ actorId: user.id, projectId: p.id, type: 'inspection.scheduled', summary: `Site visit ${insp.code} scheduled${scheduledFor ? ` for ${scheduledFor}` : ''}`, clientVisible: true })
-  if (scheduledFor) await notifyUser(p.client_id, { title: `Site visit scheduled: ${p.title}`, body: `Our field team will visit on ${scheduledFor}.`, href: `/portal/projects/${p.code}?tab=inspections` })
+  await logEvent({ actorId: user.id, projectId: p.id, type: 'inspection.scheduled', summary: `${briefProfile(p).activity} ${insp.code} scheduled${scheduledFor ? ` for ${scheduledFor}` : ''}`, clientVisible: true })
+  if (scheduledFor) await notifyUser(p.client_id, { title: `${briefProfile(p).activity} scheduled: ${p.title}`, body: `Our field team is scheduled for ${scheduledFor}.`, href: `/portal/projects/${p.code}?tab=inspections` })
   if (agentId) await notifyUser(agentId, { title: `New inspection ${insp.code}: ${p.title}`, body: scheduledFor ? `Scheduled for ${scheduledFor}.` : undefined, href: `/staff/inspections/${insp.id}` })
   refreshProject(p.code)
   redirect(`/staff/inspections/${insp.id}`)
@@ -423,7 +426,7 @@ export async function updateInspectionPlanAction(form: FormData) {
   const agentId = /^[0-9a-f-]{36}$/.test(str(form, 'agentId')) ? str(form, 'agentId') : null
   await updateInspectionPlan(insp.id, { title: formText(form, 'title', 200) ?? insp.title, scheduledFor, agentId, objectives: formText(form, 'objectives', 8000) })
   if (scheduledFor && scheduledFor !== insp.scheduled_for) {
-    await logEvent({ actorId: user.id, projectId: insp.project_id, type: 'inspection.rescheduled', summary: `Site visit ${insp.code} scheduled for ${fmtDate(scheduledFor)}`, clientVisible: true })
+    await logEvent({ actorId: user.id, projectId: insp.project_id, type: 'inspection.rescheduled', summary: `${briefProfile(access.project).activity} ${insp.code} scheduled for ${fmtDate(scheduledFor)}`, clientVisible: true })
     await notifyUser(access.project.client_id, { title: `Site visit date: ${scheduledFor}`, body: `${access.project.title}: ${insp.title}`, href: `/portal/projects/${access.project.code}?tab=inspections` })
   }
   if (agentId && agentId !== insp.agent_id) await notifyUser(agentId, { title: `Inspection ${insp.code} assigned to you`, href: `/staff/inspections/${insp.id}` })
@@ -479,7 +482,10 @@ export async function inspectionStatusAction(form: FormData) {
       where inspection_id = ${insp.id} and category = 'evidence' and status = 'ready' and integrity_flag is null and not visible_to_client
       returning id`
     await logEvent({ actorId: user.id, projectId: p.id, type: 'inspection.reviewed', summary: `${insp.code} reviewed: findings and ${released.length} evidence item${released.length === 1 ? '' : 's'} released`, clientVisible: true })
-    await notifyUser(p.client_id, { title: `New findings and evidence: ${p.title}`, body: `The inspection ${insp.code} has been reviewed. Photos, GPS evidence and findings are now in your dashboard.`, href: `/portal/projects/${p.code}?tab=inspections` })
+    const lock = await reportLock(p.id)
+    await notifyUser(p.client_id, lock
+      ? { title: `Site visit checked: ${p.title}`, body: `The inspection ${insp.code} has been reviewed. Photos, GPS evidence and findings open in your dashboard once the remaining balance is paid.`, href: `/portal/projects/${p.code}?tab=operations` }
+      : { title: `New findings and evidence: ${p.title}`, body: `The inspection ${insp.code} has been reviewed. Photos, GPS evidence and findings are now in your dashboard.`, href: `/portal/projects/${p.code}?tab=inspections` })
   }
   if (to === 'cancelled') await logEvent({ actorId: user.id, projectId: p.id, type: 'inspection.cancelled', summary: `Site visit ${insp.code} cancelled`, clientVisible: true })
   if (to === 'scheduled') await logEvent({ actorId: user.id, projectId: p.id, type: 'inspection.reopened', summary: `${insp.code} reopened` })
@@ -495,10 +501,16 @@ export async function saveInspectionCheckAction(form: FormData) {
   const note = formText(form, 'note', 4000) ?? ''
   let evidenceIds = [...new Set(form.getAll('evidenceIds').map(String))].filter(id => /^[0-9a-f-]{36}$/i.test(id))
   if (!['pending','checked','could_not_check','another_visit'].includes(outcome)) return
+  // Only this visit's own evidence can support its checks.
+  if (evidenceIds.length) {
+    const valid = await sql`select id from files where id in ${sql(evidenceIds)} and inspection_id = ${insp.id} and project_id = ${insp.project_id} and status = 'ready' and category = 'evidence'`
+    if (valid.length !== evidenceIds.length) redirect(`/staff/inspections/${insp.id}?error=${encodeURIComponent('Choose evidence uploaded for this visit.')}`)
+  }
 
-  // If marked checked and no photos were explicitly selected, auto-link any uploaded evidence for this visit
+  // If marked checked and no photos were explicitly selected, link this visit's evidence that passed the integrity check.
+  // Flagged items need a person to look at them before they support anything.
   if (outcome === 'checked' && evidenceIds.length === 0) {
-    const readyFiles = await sql<{ id: string }[]>`select id from files where inspection_id = ${insp.id} and category = 'evidence' and status = 'ready'`
+    const readyFiles = await sql<{ id: string }[]>`select id from files where inspection_id = ${insp.id} and category = 'evidence' and status = 'ready' and integrity_flag is null`
     if (readyFiles.length > 0) {
       evidenceIds = readyFiles.map(f => f.id)
     }
@@ -517,16 +529,18 @@ export async function saveInspectionCheckAction(form: FormData) {
       const [check] = await tx`update inspection_checks set outcome=${outcome},note=${note},evidence_ids=${evidenceIds},updated_by=${user.id}
         where id=${str(form,'checkId')} and inspection_id=${insp.id} returning label`
 
-      // Auto-sync completed check into findings so staff does not need to duplicate entry
+      // Auto-sync completed check into findings so staff does not need to duplicate entry. The draft finding
+      // claims no more than a tick-box shows: an analyst sets the confidence and evidence grade on review,
+      // and a status or grade someone already set is never overwritten.
       if (outcome === 'checked' && check?.label && note) {
         const [existing] = await tx`select id from findings where inspection_id = ${insp.id} and area = ${check.label}`
         if (existing) {
-          await tx`update findings set observation = ${note}, status = 'ok', confidence = 'high', evidence_grade = 'E1', evidence_ids = ${evidenceIds}, updated_at = now()
+          await tx`update findings set observation = ${note}, evidence_ids = ${evidenceIds}, updated_at = now()
             where id = ${existing.id}`
         } else {
           await tx`insert into findings (inspection_id, position, area, observation, status, confidence, evidence_grade, created_by, evidence_ids)
             values (${insp.id}, (select coalesce(max(position), 0) + 1 from findings where inspection_id = ${insp.id}),
-              ${check.label}, ${note}, 'ok', 'high', 'E1', ${user.id}, ${evidenceIds})`
+              ${check.label}, ${note}, 'ok', ${evidenceIds.length ? 'moderate' : 'limited'}, null, ${user.id}, ${evidenceIds})`
         }
       }
     })
@@ -778,6 +792,7 @@ export async function inviteStaffAction(_: StaffState, form: FormData): Promise<
   const existing = await findUserByEmail(email.data)
   if (existing) return { error: existing.role === 'client' ? 'That email belongs to a client account.' : 'That person already has a staff account.' }
   const id = await createStaffAccount({ email: email.data, fullName, role, phone: formText(form, 'phone', 40) })
+  if (!id) return { error: 'An account with that email already exists. Refresh the team list.' }
   await sendInvite(id, email.data, fullName, admin.full_name)
   await logEvent({ actorId: admin.id, type: 'team.invited', summary: `${fullName} invited as ${role}`, ipHash: await requestIpHash() })
   revalidatePath('/staff/team')
@@ -801,7 +816,7 @@ async function sendInvite(userId: string, email: string, name: string, from: str
 export async function resendInviteAction(form: FormData) {
   const admin = await requireStaff(['admin'])
   const u = await getUserById(str(form, 'userId'))
-  if (!u || u.role === 'client' || u.password_hash) return
+  if (!u || u.role === 'client' || u.password_hash || u.disabled_at) return
   await sendInvite(u.id, u.email, u.full_name, admin.full_name)
   revalidatePath('/staff/team')
 }
@@ -831,6 +846,7 @@ export async function setDisabledAction(form: FormData) {
   await logEvent({ actorId: admin.id, type: disable ? 'account.disabled' : 'account.enabled', summary: `${u.full_name} ${disable ? 'disabled' : 're-enabled'}` })
   revalidatePath('/staff/team')
   revalidatePath('/staff/clients')
+  revalidatePath(`/staff/clients/${u.id}`)
 }
 
 const num = (form: FormData, key: string) => {

@@ -5,6 +5,7 @@ import { appUrl, sendEmail } from '@/lib/email'
 import { invoiceDocument } from '@/lib/data/invoices'
 import { invoicePdf } from '@/lib/invoice-pdf'
 import { site } from '@/lib/site'
+import { paystackEnabled } from '@/lib/paystack'
 
 const money = (n: number) => `KES ${Math.round(n).toLocaleString('en-US')}`
 const date = (d: string) => new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Africa/Nairobi' }).format(new Date(`${d}T12:00:00+03:00`))
@@ -22,9 +23,10 @@ export async function emailInvoice(invoiceId: string, projectId: string, actorId
   const link = `${appUrl()}/portal/projects/${inv.project.code}?tab=operations`
   const { mpesaPaybill, bankDetails } = site.payment
   const howToPay = inv.balanceKes > 0
-    ? ['How to pay:', mpesaPaybill ? `  M-Pesa Paybill ${mpesaPaybill}, account ${inv.code}` : '', bankDetails ? `  Bank transfer: ${bankDetails}, reference ${inv.code}` : '',
-       !mpesaPaybill && !bankDetails ? '  Your analyst will send payment details. Pay only through official AngaVeritas channels.' : '',
-       `After paying, send us the transaction reference under Payments: ${link}`].filter(Boolean)
+    ? ['How to pay:', paystackEnabled() ? `  Pay your deposit or balance securely through your portal: ${link}` : '',
+       mpesaPaybill ? `  M-Pesa Paybill ${mpesaPaybill}, account ${inv.code}` : '', bankDetails ? `  Bank transfer: ${bankDetails}, reference ${inv.code}` : '',
+       !paystackEnabled() && !mpesaPaybill && !bankDetails ? '  Your analyst will send payment details. Pay only through official AngaVeritas channels.' : '',
+       `For payments made outside portal checkout, send us the transaction reference under Payments: ${link}`].filter(Boolean)
     : []
   const due = inv.dueOn ? ` by ${date(inv.dueOn)}` : ''
   const overdue = !!inv.dueOn && new Date(`${inv.dueOn}T23:59:59+03:00`) < new Date()
@@ -78,6 +80,7 @@ export async function emailInvoice(invoiceId: string, projectId: string, actorId
 
   await sendEmail({
     to: inv.client.email,
+    copyTeam: true,
     subject,
     text: lines.filter((l, i, a) => l !== '' || a[i - 1] !== '').join('\n'),
     attachments: [{ filename: `AngaVeritas-${inv.code}.pdf`, content: await invoicePdf(inv) }],

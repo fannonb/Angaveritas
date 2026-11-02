@@ -1,4 +1,6 @@
 import { z } from 'zod'
+import { normalizePhoneNumber } from './phone'
+import { locationCountry, locationRegion } from './location'
 
 const text = (max: number) => z.string().trim().max(max)
 const optText = (max: number) =>
@@ -11,6 +13,12 @@ const optText = (max: number) =>
 
 export const emailSchema = z.string().trim().toLowerCase().email('Please enter a valid email address.').max(160)
 export const phoneSchema = text(40).min(7, 'Please enter a phone or WhatsApp number with country code.')
+export const accountPhoneSchema = text(40)
+  .refine(value => !!normalizePhoneNumber(value), 'Please enter a valid phone number with its country code.')
+  .transform(value => normalizePhoneNumber(value)!)
+export const whatsappSchema = text(40).nullish()
+  .refine(value => !value || !!normalizePhoneNumber(value), 'Please enter a valid WhatsApp number with its country code, or leave it blank.')
+  .transform(value => value ? normalizePhoneNumber(value)! : null)
 
 export const placeSchema = z.object({
   label: text(200).min(1),
@@ -18,15 +26,27 @@ export const placeSchema = z.object({
   lng: z.number().finite(),
 })
 
+const locationFields = {
+  countryCode: text(2).min(1, 'Please select your country.'),
+  regionCode: text(150).min(1, 'Please select your state, county or region.'),
+}
+function validateLocation(value: { countryCode: string; regionCode: string }, context: z.RefinementCtx) {
+  const country = locationCountry(value.countryCode)
+  if (!country) context.addIssue({ code: 'custom', path: ['countryCode'], message: 'Please select a valid country.' })
+  else if (!locationRegion(value.countryCode, value.regionCode)) context.addIssue({ code: 'custom', path: ['regionCode'], message: `Please select a ${country.label.toLowerCase()} belonging to ${country.name}.` })
+}
+export const accountLocationSchema = z.object(locationFields).superRefine(validateLocation)
+
 export const registerSchema = z.object({
   fullName: text(120).min(2, 'Please enter your full name.'),
   email: emailSchema,
-  phone: phoneSchema,
-  basedIn: optText(80),
+  phone: accountPhoneSchema,
+  whatsapp: whatsappSchema,
+  ...locationFields,
   timezone: z.string().max(60).optional(),
   password: z.string().min(1, 'Please choose a password.').max(200),
   consent: z.literal(true, { error: 'Please accept the Privacy Policy and Terms to create an account.' }),
-})
+}).superRefine(validateLocation)
 
 export const loginSchema = z.object({
   email: emailSchema,
@@ -55,7 +75,7 @@ export const requestSubmitSchema = z
     urgencyCode: z.string().regex(/^[a-z_]+$/).optional(),
     parentProjectCode: z.string().regex(/^AVP-\d+$/).optional(),
     brief: projectBriefSchema,
-    account: z.discriminatedUnion('mode', [registerSchema.extend({ mode: z.literal('register') }), loginSchema.extend({ mode: z.literal('login') })]).optional(),
+    account: z.discriminatedUnion('mode', [registerSchema.safeExtend({ mode: z.literal('register') }), loginSchema.extend({ mode: z.literal('login') })]).optional(),
     website: z.string().max(500).optional(), // honeypot
   })
   .superRefine((v, ctx) => {

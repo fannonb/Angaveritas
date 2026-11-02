@@ -13,6 +13,8 @@ import { emailInvoice } from '@/lib/invoice-send'
  * ledger; a manager lifts it by choosing another status.
  */
 export async function reconcileProjectPayment(tx: postgres.TransactionSql, projectId: string) {
+  // Serialize totals across separate invoice payments on the same project.
+  await tx`select id from projects where id=${projectId} for update`
   const [guard] = await tx<{ current: string; set_at: Date | null; ledger_at: Date | null }[]>`
     select p.payment_status as current, p.payment_status_set_at as set_at, greatest(
       (select max(i.created_at) from invoices i where i.project_id = ${projectId}),
@@ -237,6 +239,8 @@ export async function recordPayment(projectId: string, actorId: string, input: {
     const [balance] = await tx`select coalesce(sum(case when kind='payment' then amount_kes else -amount_kes end),0)::int paid from payments where invoice_id=${invoice.id}`
     if (input.kind === 'refund' && input.amount > balance.paid) throw new Error('Refund cannot exceed the recorded payment.')
     if (input.kind === 'payment' && input.amount + balance.paid > invoice.amount_kes) throw new Error('Payment exceeds the invoice balance.')
+    if ((await tx`select 1 from payments where lower(trim(reference))=lower(trim(${input.reference}))`).length)
+      throw new Error('This transaction reference is already recorded. Use the exact unique transaction reference.')
     try {
       await tx`insert into payments(invoice_id,amount_kes,kind,reference,note,recorded_by) values (${invoice.id},${input.amount},${input.kind},${input.reference},${input.note},${actorId})`
     } catch (e) {
@@ -265,10 +269,17 @@ export async function submitPaymentNotice(projectId: string, clientId: string, i
     const [invoice] = await tx`select i.id from invoices i join projects p on p.id=i.project_id
       where i.id=${input.invoiceId} and i.project_id=${projectId} and p.client_id=${clientId} and i.status='issued' for share of i,p`
     if (!invoice) throw new Error('Invoice not found or cancelled.')
-    const existing = await tx`select 1 from payment_notices where lower(trim(reference))=lower(trim(${input.reference}))`
+    // Only this client's own notices are checked, so the answer never reveals another client's payment.
+    const existing = await tx`select 1 from payment_notices where submitted_by=${clientId} and lower(trim(reference))=lower(trim(${input.reference}))`
     if (existing.length) throw new Error('This reference has already been sent. Check its status below or message your analyst.')
-    await tx`insert into payment_notices(invoice_id,project_id,submitted_by,amount_kes,reference,note)
-      values(${invoice.id},${projectId},${clientId},${input.amount},${input.reference.trim()},${input.note})`
+    try {
+      await tx`insert into payment_notices(invoice_id,project_id,submitted_by,amount_kes,reference,note)
+        values(${invoice.id},${projectId},${clientId},${input.amount},${input.reference.trim()},${input.note})`
+    } catch (e) {
+      // References are unique across all clients; say nothing about whose it is.
+      if ((e as { code?: string }).code === '23505') throw new Error('We could not record this reference. Check it against your receipt, or message your analyst.')
+      throw e
+    }
   })
 }
 

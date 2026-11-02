@@ -5,23 +5,41 @@ import { createClientAccount, findUserByEmail, markEmailVerified } from '@/lib/d
 import { hashPassword, passwordProblem, verifyAgainstDummy, verifyPassword } from './password'
 import { createSession, loginBlocked, recordLogin, requestIpHash } from './session'
 import { issueToken } from './tokens'
+import { formatLocation } from '@/lib/location'
+import { accountLocationSchema } from '@/lib/validation'
 
 // Registration and sign-in, shared by the auth pages and the calculator's
 // "create an account to submit" step.
 
 export type AuthResult = { ok: true; user: { id: string; role: import('@/lib/labels').Role } } | { ok: false; error: string; field?: string }
 
-export async function registerClient(input: { fullName: string; email: string; phone: string; basedIn: string | null; timezone?: string; password: string }): Promise<AuthResult> {
+export async function registerClient(input: { fullName: string; email: string; phone: string; whatsapp?: string | null; countryCode: string; regionCode: string; timezone?: string; password: string }): Promise<AuthResult> {
   const problem = passwordProblem(input.password)
   if (problem) return { ok: false, error: problem, field: 'password' }
-  const existing = await findUserByEmail(input.email)
-  if (existing) return { ok: false, error: 'An account with this email already exists. Sign in instead, or reset your password.', field: 'email' }
-  const tz = input.timezone && /^[A-Za-z_]+(\/[A-Za-z_+\-0-9]+)*$/.test(input.timezone) ? input.timezone : 'Africa/Nairobi'
+  const location = accountLocationSchema.safeParse(input)
+  if (!location.success) return { ok: false, error: location.error.issues[0]?.message ?? 'Choose your location.', field: String(location.error.issues[0]?.path[0] ?? 'countryCode') }
+  const basedIn = formatLocation(input.countryCode, input.regionCode)
+  // "Already registered" tells the visitor an email is in use. That is kept for real people, but it counts
+  // as a failed attempt from this connection, so the form cannot be used to check addresses in bulk.
+  const email = input.email.trim().toLowerCase()
+  const ip = await requestIpHash()
+  if (await loginBlocked(email, ip)) return { ok: false, error: 'Too many attempts. Please wait 15 minutes and try again.', field: 'email' }
+  const existing = await findUserByEmail(email)
+  if (existing) {
+    await recordLogin(email, ip, false)
+    return { ok: false, error: 'An account with this email already exists. Sign in instead, or reset your password.', field: 'email' }
+  }
+  let tz = input.timezone || 'Africa/Nairobi'
+  try { new Intl.DateTimeFormat('en', { timeZone: tz }) } catch { tz = 'Africa/Nairobi' }
   const id = await createClientAccount({ ...input, passwordHash: await hashPassword(input.password), timezone: tz })
+  if (!id) {
+    await recordLogin(email, ip, false)
+    return { ok: false, error: 'An account with this email already exists. Sign in instead, or reset your password.', field: 'email' }
+  }
   await createSession({ id, role: 'client' })
   await sendVerificationEmail(id, input.email, input.fullName)
   await logEvent({ actorId: id, type: 'account.registered', summary: `${input.fullName} created an account`, ipHash: await requestIpHash() })
-  await notifyTeam({ title: `New client account: ${input.fullName}`, body: `${input.fullName} (${input.email}, ${input.phone}) registered${input.basedIn ? ` from ${input.basedIn}` : ''}.`, href: '/staff/clients' })
+  await notifyTeam({ title: `New client account: ${input.fullName}`, body: `${input.fullName} (${input.email}) registered from ${basedIn}. Phone: ${input.phone}.${input.whatsapp ? ` WhatsApp: ${input.whatsapp}.` : ''}`, href: '/staff/clients' })
   return { ok: true, user: { id, role: 'client' } }
 }
 
@@ -60,7 +78,7 @@ export async function signInWithPassword(emailRaw: string, password: string): Pr
     }
   }
   if (user.disabled_at) return { ok: false, error: 'This account has been disabled. Please contact AngaVeritas.' }
-  await createSession(user)
+  await createSession(user, user.password_hash)
   return { ok: true, user: { id: user.id, role: user.role } }
 }
 

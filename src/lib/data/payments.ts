@@ -9,11 +9,11 @@ export type InvoiceStatus = 'paid' | 'part' | 'due' | 'overdue' | 'checking' | '
 
 export async function clientPayments(clientId: string, historyPage = 1) {
   const rows = await sql<{
-    id: string; code: string; label: string; amount_kes: number; paid_kes: number; owed_kes: number
+    id: string; code: string; label: string; amount_kes: number; deposit_kes: number; paid_kes: number; owed_kes: number
     due_on: string | null; sent_at: Date | null; created_at: Date
     project_code: string; project_title: string; payment_status: string; checking: boolean
   }[]>`
-    select i.id, i.code, i.label, i.amount_kes, i.due_on::text as due_on, i.sent_at, i.created_at,
+    select i.id, i.code, i.label, i.amount_kes, i.deposit_kes, i.due_on::text as due_on, i.sent_at, i.created_at,
       coalesce((select sum(case when pay.kind = 'payment' then pay.amount_kes else -pay.amount_kes end) from payments pay where pay.invoice_id = i.id), 0)::int as paid_kes,
       (i.amount_kes - coalesce((select sum(case when pay.kind = 'payment' then pay.amount_kes else -pay.amount_kes end) from payments pay where pay.invoice_id = i.id), 0))::int as owed_kes,
       p.code as project_code, p.title as project_title, p.payment_status,

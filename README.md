@@ -47,11 +47,11 @@ See `docs/IMPLEMENTATION_STATUS.md` for completed work, integration boundaries a
 
 `/staff/integrations` shows configuration and email delivery status. Without an email key, messages remain in the outbox and development links are printed to the terminal. With a Resend key, delivery is attempted immediately and failed sends are retained for retry.
 
-Schedule `POST /api/jobs` with `Authorization: Bearer <WORKER_SECRET>` for email retries. Set `WORKER_USER_ID` to a dedicated active admin if the worker should also generate monitoring invoices. Do not put worker secrets in browser code or URLs. Jobs do not dispatch field teams or process real payments.
+Vercel Cron calls `/api/jobs` daily (see `vercel.json`; set `CRON_SECRET`). For more frequent email retries, also schedule `POST /api/jobs` with `Authorization: Bearer <WORKER_SECRET>`. Set `WORKER_USER_ID` to a dedicated active admin if the worker should also generate monitoring invoices. Do not put worker secrets in browser code or URLs. Jobs do not dispatch field teams or process real payments.
 
 `NEXT_PUBLIC_BOOKING_URL` and `NEXT_PUBLIC_WHATSAPP` enable the existing contact paths. `FILE_SCAN_URL` accepts an authenticated raw-byte POST and must respond with `{ "clean": true }`; `FILE_SCAN_KEY` supplies its Bearer credential.
 
-Payment checkout/callback routes and the gateway contract are scaffolded in `src/lib/integrations.ts`. They **fail closed** until a real provider adapter and reconciliation handler are implemented and tested. Adding keys alone does not turn these into live M-Pesa/card payments. The manual billing ledger is usable now.
+Paystack hosted checkout supports KES deposits and balances with signed webhooks, server verification, transactional reconciliation and dashboard-initiated refund synchronization. Configure the merchant account, payment audit identity, webhook and scheduled worker before enabling checkout. See `docs/PAYSTACK.md` for setup and live validation. The manual billing ledger remains available.
 
 Pricing retains the technical blueprint's round-trip thresholds and subtotal urgency rule. Admins can set an approved per-extra-site fee. Until configured, missing fees/travel are marked TBC. Located additional sites are costed as separate return trips; shared routes and work duration are confirmed in the proposal.
 
@@ -106,7 +106,7 @@ The site needs Node hosting now; plain cPanel/PHP hosting no longer works.
 2. **Vercel**: import the repository and set:
    - `DATABASE_URL`, `SESSION_SECRET` (long random string), `IP_HASH_SALT` (long random string), `APP_URL=https://angaveritas.com`
    - Files: `STORAGE_DRIVER=r2`, `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` (the private bucket, e.g. `angaveritas`). Create the access key under R2 → Manage API Tokens; the secret is shown once.
-   - Email: `RESEND_API_KEY`, `EMAIL_FROM` (a verified sender such as `AngaVeritas <no-reply@angaveritas.com>`), `NOTIFY_EMAIL` (team inbox)
+   - Email: `RESEND_API_KEY`, `EMAIL_FROM` (a verified sender such as `AngaVeritas <no-reply@angaveritas.com>`), `NOTIFY_EMAIL` (optional additional team inboxes, comma-separated). `info@angaveritas.com` always receives team alerts and separate copies of business updates, acknowledgements and invoices. Verification, password-reset and invitation links are not copied. Client emails reply to the shared inbox; enquiry and client-message alerts reply to the client. Admins are included in team alerts, subject to their email preferences.
 3. Point `angaveritas.com` at Vercel. Run `npm run user:add` once against production for the first admin.
 
 ## Where things live
@@ -127,6 +127,6 @@ docs/                business plan, customer journey, technical and pricing docu
 
 ## Not built yet
 
-From the technical document's later phases: live payment-provider adapters (M-Pesa/card), a complete offline field app, automated PDF generation
+From the technical document's later phases: automatic recurring payment collection, a complete offline field app, automated report PDF generation
 (reports print to PDF from the browser, or staff upload a designed PDF), market-intelligence feeds, calendar booking
 (set `bookingUrl` in `src/lib/site.ts` to show booking links), WhatsApp/SMS notifications.

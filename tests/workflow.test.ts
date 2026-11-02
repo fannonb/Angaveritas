@@ -90,7 +90,7 @@ describe('staff next step', () => {
 })
 
 describe('client next step', () => {
-  const p = { code: 'AVP-1', stage: 'planning' as const, onboarding_submitted_at: new Date() }
+  const p = { code: 'AVP-1', service_code:'ground_verification', stage: 'planning' as const, onboarding_submitted_at: new Date() }
   const fmt = (d: string) => d
   it('asks for site details, then payment, before anything else', () => {
     expect(clientNextStep({ ...p, stage: 'onboarding', onboarding_submitted_at: null }, [], [], { amount: 'KES 3,000', invoice: 'AVB-1' }, fmt).action?.href).toBe('/portal/projects/AVP-1?tab=onboarding')

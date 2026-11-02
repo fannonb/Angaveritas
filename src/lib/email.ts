@@ -1,6 +1,7 @@
 import 'server-only'
 import { site } from '@/lib/site'
 import { sql } from '@/lib/db'
+import { renderEmailHtml } from '@/lib/email-template'
 
 // Outgoing email via Resend (resend.com). Without RESEND_API_KEY the message
 // is printed to the server console instead, which is how sign-up and reset
@@ -11,8 +12,13 @@ export const appUrl = () => (process.env.APP_URL ?? 'http://localhost:3000').rep
 
 export type EmailAttachment = { filename: string; content: Uint8Array }
 
-export async function sendEmail(msg: { to: string | string[]; subject: string; text: string; replyTo?: string; attachments?: EmailAttachment[] }) {
-  const to = Array.isArray(msg.to) ? msg.to : [msg.to]
+export async function sendEmail(msg: { to: string | string[]; subject: string; text: string; replyTo?: string; attachments?: EmailAttachment[]; copyTeam?: boolean }) {
+  const to = [...new Set((Array.isArray(msg.to) ? msg.to : [msg.to]).map(email => email.trim().toLowerCase()).filter(Boolean))]
+  // Separate outbox messages keep internal recipients private and give copies independent retries.
+  const copies = msg.copyTeam ? teamInboxes().filter(email => !to.includes(email)) : []
+  for (const recipient of copies) {
+    await sendEmail({ ...msg, to: recipient, copyTeam: false })
+  }
   const key = process.env.RESEND_API_KEY
   const body = `${msg.text}\n\n—\nAngaVeritas · ${site.location}\n${site.email}`
   // Attachments are stored with the message (base64) so a retry sends exactly the same file.
@@ -48,6 +54,7 @@ export async function deliverQueuedEmail(id?: string) {
         reply_to: claimed.reply_to ?? site.email,
         subject: claimed.subject,
         text: claimed.body,
+        html: renderEmailHtml(claimed.subject, claimed.body, { logoUrl: `${appUrl()}/images/email-logo.png`, siteUrl: appUrl(), location: site.location, email: site.email }),
         ...(claimed.attachments ? { attachments: claimed.attachments } : {}),
       }),
       signal: AbortSignal.timeout(8000),
@@ -63,4 +70,4 @@ export async function deliverQueuedEmail(id?: string) {
 }
 
 /** Address for team alerts (new requests, onboarding submitted, client messages). */
-export const teamInbox = () => process.env.NOTIFY_EMAIL ?? site.email
+export const teamInboxes = () => [...new Set([site.email, ...(process.env.NOTIFY_EMAIL ?? '').split(/[,;\n]/)].map(email => email.trim().toLowerCase()).filter(Boolean))]

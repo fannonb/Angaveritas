@@ -1,3 +1,4 @@
+import { briefProfile, type BriefContext } from './service-briefs'
 import type { ProjectStage, RequestStatus, Role } from './labels'
 
 export function fieldworkProblem(p: { onboarding_submitted_at: unknown; data_consent_at: unknown; payment_status: string; lead_analyst_id: string | null; nda_status?: string }, agentId: string | null) {
@@ -60,7 +61,7 @@ export type ClientNextStep = { title: string; text: string; action?: { label: st
 
 /** What the client needs to know or do next on a project, in plain words. `due` is an unpaid deposit, already formatted; `balance` is the money owed after it, once the report is out. */
 export function clientNextStep(
-  p: { code: string; stage: ProjectStage; onboarding_submitted_at: unknown; nda_status?: string; data_consent_at?: unknown },
+  p: BriefContext & { code: string; stage: ProjectStage; onboarding_submitted_at: unknown; nda_status?: string; data_consent_at?: unknown },
   inspections: { status: string; scheduled_for: string | null }[],
   reports: { id: string; client_viewed_at?: unknown }[],
   due: { amount: string; invoice: string; paymentNotified?: boolean } | null,
@@ -69,19 +70,21 @@ export function clientNextStep(
   reportLocked: { amount: string; invoice: string } | null = null,
 ): ClientNextStep {
   const base = `/portal/projects/${p.code}`
+  const profile = briefProfile(p)
+  const isGround = profile.code === 'ground_verification'
   if (p.stage === 'closed' && reportLocked) return { title: 'Pay the remaining balance', text: `${reportLocked.amount} is still due for ${reportLocked.invoice}. Your report opens once it is settled.`, action: { label: 'How to pay', href: `${base}?tab=operations` } }
   if (p.stage === 'closed') return { title: 'This project is complete', text: 'Your reports and evidence stay here. If you need another visit, ask for a follow-up.', action: { label: 'Request a follow-up', href: `/estimate?project=${p.code}` } }
-  if (!p.onboarding_submitted_at) return { title: 'Tell us about the site', text: 'Where it is, who we should meet and what you have been told. We plan the visit from this.', action: { label: 'Add site details', href: `${base}?tab=onboarding` } }
-  if ('data_consent_at' in p && !p.data_consent_at) return { title:'Fieldwork is paused',text:'Your consent is withdrawn. Contact your analyst to discuss what happens next, or review your site details to give consent again.',action:{label:'Contact your analyst',href:`${base}?tab=messages`} }
+  if (!p.onboarding_submitted_at) return { title: `Complete your ${profile.tab.toLowerCase()}`, text: profile.intro, action: { label: `Add ${profile.tab.toLowerCase()}`, href: `${base}?tab=onboarding` } }
+  if ('data_consent_at' in p && !p.data_consent_at) return { title:'Fieldwork is paused',text:'Your consent is withdrawn. Contact your analyst to discuss what happens next, or review your service brief to give consent again.',action:{label:'Contact your analyst',href:`${base}?tab=messages`} }
   if (due?.paymentNotified) return {title:'Confirming your payment',text:`We have your payment reference for invoice ${due.invoice}. The payment team will check the funds and update your balance. No further payment is needed while this is being checked.`}
-  if (due) return { title: 'Pay the deposit', text: `We book the site visit once we receive ${due.amount} for invoice ${due.invoice}.`, action: { label: 'How to pay', href: `${base}?tab=operations` } }
+  if (due) return { title: 'Pay the deposit', text: `We confirm the work plan once we receive ${due.amount} for invoice ${due.invoice}.`, action: { label: 'How to pay', href: `${base}?tab=operations` } }
   if (balance && (p.stage === 'delivered' || p.stage === 'monitoring')) return { title: 'Pay the remaining balance', text: `${balance.amount} is still due for ${balance.invoice}. Your report opens once it is settled.`, action: { label: 'How to pay', href: `${base}?tab=operations` } }
   if (p.nda_status === 'prepared') return { title: 'Sign your confidentiality agreement', text: 'Your agreement is ready. We will start fieldwork once it is signed.', action: { label: 'Review agreement', href: `${base}?tab=agreement` } }
   if (p.nda_status === 'requested') return { title: 'Preparing your confidentiality agreement', text: 'Your analyst is preparing the NDA you requested. We will ask you to sign it before fieldwork starts.' }
   const open = inspections.filter((i) => ['scheduled', 'in_progress', 'submitted'].includes(i.status))
-  if (open.some((i) => i.status === 'in_progress')) return { title: 'We are at the site', text: 'Our field agent is collecting photos, video and GPS evidence. You will see it here once it has been checked.' }
+  if (open.some((i) => i.status === 'in_progress')) return { title: isGround ? 'We are at the site' : `${profile.activity} under way`, text: 'Our field agent is collecting evidence for the agreed checks. You will see it here once it has been reviewed.' }
   const visit = open.find((i) => i.status === 'scheduled')
-  if (visit) return { title: visit.scheduled_for ? `Site visit on ${fmtDate(visit.scheduled_for)}` : 'We are arranging the visit date', text: 'Our field agent will collect photos, video and GPS evidence. You will see it here once it has been checked.' }
+  if (visit) return { title: visit.scheduled_for ? `${profile.activity} on ${fmtDate(visit.scheduled_for)}` : 'We are arranging the visit date', text: 'Our field agent will collect photos, video and GPS evidence. You will see it here once it has been checked.' }
   if (open.length) return { title: 'Checking the evidence', text: 'A second person checks every finding and photo before it reaches you.' }
   const report = reports[0]
   if (report && reportLocked) return { title: 'Your report opens once it is paid', text: `Pay ${reportLocked.amount} for ${reportLocked.invoice} to read the findings and our recommendation.`, action: { label: 'How to pay', href: `${base}?tab=operations` } }
@@ -90,7 +93,7 @@ export function clientNextStep(
     ? { title: 'Ongoing monitoring', text: 'We visit the site on a schedule and update you here after each visit.' }
     : { title: 'Report delivered', text: 'Questions about the findings? Message your analyst, or ask for a follow-up visit.', action: { label: 'Message your analyst', href: `${base}?tab=messages` } }
   if (inspections.some((i) => i.status === 'reviewed')) return { title: 'Writing your report', text: 'Your analyst is writing the report. A second person checks it before it is released.' }
-  return { title: 'Planning your visit', text: 'Your analyst is preparing the visit. The date will appear here.' }
+  return { title: isGround ? 'Planning your visit' : `Planning your ${profile.activity.toLowerCase()}`, text: 'Your analyst is reviewing the brief and preparing the agreed work. The schedule will appear here.' }
 }
 
 export type RequestNextStep = { title: string; text: string; action?: 'take' | 'start' | 'proposal' | 'message' | 'project' }

@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { getUser } from '@/lib/auth/session'
-import { allowedMime, createPendingFile } from '@/lib/data/files'
+import { allowedMime, createPendingFile, macroCapableMime, openUploadsBy, scanningEnabled } from '@/lib/data/files'
 import { getInspection } from '@/lib/data/inspections'
 import { projectFor } from '@/lib/data/projects'
 import { json, sameOrigin } from '@/lib/request'
@@ -41,6 +41,7 @@ export async function POST(req: Request) {
   const mime = f.mime.toLowerCase()
   let mediaType = allowedMime[mime]
   if (!mediaType) return json({ error: 'This file type is not accepted. Use photos (JPG, PNG, HEIC), videos (MP4, MOV) or documents (PDF, Word, Excel).' }, 415)
+  if (macroCapableMime.has(mime) && !scanningEnabled()) return json({ error: 'Older .doc and .xls files are not accepted. Save the file as .docx, .xlsx or PDF and upload it again.' }, 415)
   if (f.category === 'report' && mime !== 'application/pdf') return json({ error: 'Reports must be PDF files.' }, 415)
   if (f.category === 'agreement' && mime !== 'application/pdf') return json({ error: 'Agreements must be PDF files.' }, 415)
   if (f.drone && mediaType === 'photo') mediaType = 'drone'
@@ -61,6 +62,9 @@ export async function POST(req: Request) {
   if (f.category === 'evidence' && !inspectionId) return json({ error: 'Add evidence to an assigned inspection.' }, 422)
   if (user.role === 'field_agent' && f.category !== 'evidence') return json({ error: 'Field agents can upload inspection evidence only.' }, 403)
 
+  // Unfinished uploads cost storage, so each person may only have a handful open at once.
+  if ((await openUploadsBy(user.id)) >= 30) return json({ error: 'You have many uploads still in progress. Let them finish, or try again in an hour.' }, 429)
+
   const storageKey = makeStorageKey(`projects/${f.projectId}/${f.category}`, f.filename)
   const fileId = await createPendingFile({
     projectId: f.projectId,
@@ -76,5 +80,5 @@ export async function POST(req: Request) {
     visibleToClient: f.category === 'client_document',
     uploadedBy: user.id,
   })
-  return json({ fileId, upload: await uploadTarget(fileId, storageKey) }, 201)
+  return json({ fileId, upload: await uploadTarget(fileId, storageKey, f.size) }, 201)
 }

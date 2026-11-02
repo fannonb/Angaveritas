@@ -2,7 +2,7 @@ import 'server-only'
 import exifr from 'exifr'
 import { sql, withActor } from '@/lib/db'
 import { haversineKm } from '@/lib/geo'
-import { inspectObject, scanObject } from '@/lib/storage'
+import { deleteObject, inspectObject, scanObject } from '@/lib/storage'
 import type { SessionUser } from '@/lib/auth/session'
 import { fieldCollectionProblem, filePermission } from '@/lib/workflow'
 import { projectFor } from './projects'
@@ -62,6 +62,10 @@ export const allowedMime: Record<string, MediaType> = {
   'text/csv': 'document',
 }
 
+/** Old binary Word and Excel files can carry macros, so they are only taken when a virus scanner checks every upload. */
+export const macroCapableMime = new Set(['application/msword', 'application/vnd.ms-excel'])
+export const scanningEnabled = () => !!process.env.FILE_SCAN_URL
+
 const base = () => sql`
   select f.*, i.code as inspection_code, u.full_name as uploader_name, u.role as uploader_role
   from files f join users u on u.id = f.uploaded_by left join inspections i on i.id = f.inspection_id`
@@ -105,14 +109,10 @@ export async function mayReadFile(user: Pick<SessionUser, 'id' | 'role'>, file: 
       or exists(select 1 from report_evidence e join reports r on r.id=e.report_id where e.file_id=${file.id} and r.status='published')`
     if (!released.length) return false
   }
-  // A client cannot open a published report, or the evidence attached to it, until the balance is paid.
-  if (user.role === 'client') {
-    const linked = await sql`select 1 from reports r where r.project_id = ${file.project_id} and r.status = 'published'
-      and (r.pdf_file_id = ${file.id} or exists(select 1 from report_evidence e where e.report_id = r.id and e.file_id = ${file.id}))`
-    if (linked.length) {
-      const [open] = await sql<{ unlocked: boolean }[]>`select client_reports_unlocked(${file.project_id}) as unlocked`
-      if (!open?.unlocked) return false
-    }
+  // A client cannot open evidence or report PDFs until the balance is paid, whether or not a report is published yet.
+  if (user.role === 'client' && (file.category === 'evidence' || file.category === 'report')) {
+    const [open] = await sql<{ unlocked: boolean }[]>`select client_reports_unlocked(${file.project_id}) as unlocked`
+    if (!open?.unlocked) return false
   }
   const assigned = user.role === 'field_agent' && file.inspection_id
     ? (await sql`select 1 from inspections where id = ${file.inspection_id} and project_id = ${file.project_id} and
@@ -135,7 +135,8 @@ export async function uploadWriteProblem(user: Pick<SessionUser, 'id' | 'role'>,
   if (file.category === 'evidence') {
     const inspection = file.inspection_id ? await getInspection(file.inspection_id) : null
     if (!inspection || inspection.project_id !== file.project_id) return 'Inspection not found.'
-    if (user.role === 'field_agent' && inspection.agent_id !== user.id) return 'Inspection assignment has changed.'
+    // Same rule as starting the upload: the visit's agent, or the project's agent when the visit has none.
+    if (user.role === 'field_agent' && inspection.agent_id !== user.id && !(inspection.agent_id === null && access.project.field_agent_id === user.id)) return 'Inspection assignment has changed.'
     return fieldCollectionProblem(access.project, inspection)
   }
   return access.canManage ? null : 'Not allowed.'
@@ -242,8 +243,32 @@ export async function deleteFileRow(id: string) {
   return row?.storage_key ?? null
 }
 
+/** Uploads this person started in the last hour that have not finished. */
+export async function openUploadsBy(userId: string) {
+  const [row] = await sql<{ n: number }[]>`
+    select count(*)::int as n from files where uploaded_by = ${userId} and status = 'pending' and created_at > now() - interval '1 hour'`
+  return row.n
+}
+
 /** Pending uploads older than a day never completed; callers can clean them up. */
-export async function stalePendingFiles() {
+export async function stalePendingFiles(limit = 50) {
   return sql<{ id: string; storage_key: string }[]>`
-    select id, storage_key from files where status <> 'ready' and created_at < now() - interval '1 day'`
+    select id, storage_key from files where status <> 'ready' and created_at < now() - interval '1 day' order by created_at limit ${limit}`
+}
+
+/** Deletes abandoned and rejected uploads so storage does not fill with files nobody can open. */
+export async function removeStaleUploads() {
+  let removed = 0
+  for (const f of await stalePendingFiles()) {
+    try {
+      // The row goes first: if anything still refers to it, the delete fails and the bytes are kept.
+      const [gone] = await sql`delete from files where id = ${f.id} and status <> 'ready' returning id`
+      if (!gone) continue
+      await deleteObject(f.storage_key)
+      removed++
+    } catch (e) {
+      console.error('[files] stale upload clean-up failed', { id: f.id, error: e instanceof Error ? e.message : e })
+    }
+  }
+  return removed
 }

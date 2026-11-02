@@ -15,7 +15,7 @@ export default async function AccountPage() {
       <div className="grid gap-6 lg:grid-cols-2 lg:items-start">
         <section className="panel panel-pad space-y-4">
           <h2 className="text-lg">Your details</h2>
-          <ProfileForm v={{ fullName: user.full_name, phone: user.phone ?? '', basedIn: user.based_in ?? '', timezone: user.timezone, email: user.email }} />
+          <ProfileForm v={{ fullName: user.full_name, phone: user.phone ?? '', whatsapp: user.whatsapp ?? '', countryCode: user.country_code ?? '', regionCode: user.region_code ?? '', timezone: user.timezone, email: user.email }} />
         </section>
         <div className="space-y-6">
           <section className="panel panel-pad space-y-3"><h2 className="text-lg">Notifications</h2><form action={notificationPreferenceAction} className="space-y-3"><label className="check"><input type="checkbox" name="emailUpdates" defaultChecked={preferences.email_updates} />Email me project updates</label><p className="hint">Account security emails and in-app updates remain available.</p><button className="btn btn-secondary btn-small" type="submit">Save preference</button></form></section>

@@ -1,0 +1,20 @@
+# Local-only folders and files. Vercel installs dependencies and builds the app itself.
+node_modules
+.next
+.next-production
+.next-workflow
+.next-accounts
+.next-paystack
+.tmp-paystack
+.vercel
+test-results
+storage
+.superdesign
+.git
+*.tsbuildinfo
+# Local secrets and notes never go to Vercel. Production values live in the Vercel dashboard.
+.env
+.env.*
+ACCESS.md
+.claude
+.mcp.json

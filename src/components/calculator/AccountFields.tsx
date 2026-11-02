@@ -1,10 +1,12 @@
 'use client'
+import PhoneNumberField from '@/components/app/PhoneNumberField'
+import LocationFields from '@/components/app/LocationFields'
 
 export type Account =
-  | { mode: 'register'; fullName: string; email: string; phone: string; basedIn: string; password: string; consent: boolean }
+  | { mode: 'register'; fullName: string; email: string; phone: string; whatsapp: string; countryCode: string; regionCode: string; password: string; consent: boolean }
   | { mode: 'login'; email: string; password: string }
 
-export const emptyRegister: Account = { mode: 'register', fullName: '', email: '', phone: '', basedIn: '', password: '', consent: false }
+export const emptyRegister: Account = { mode: 'register', fullName: '', email: '', phone: '', whatsapp: '', countryCode: '', regionCode: '', password: '', consent: false }
 
 // Shown at the end of the calculator to visitors who aren't signed in:
 // the request is saved to their account so they can follow it from the dashboard.
@@ -41,14 +43,9 @@ export default function AccountFields({ value, onChange }: { value: Account; onC
             Email
             <input className="input" type="email" autoComplete="email" required maxLength={160} value={value.email} onChange={set('email')} />
           </label>
-          <label className="label">
-            Phone or WhatsApp
-            <input className="input" type="tel" autoComplete="tel" required maxLength={40} placeholder="+254… or +44…" value={value.phone} onChange={set('phone')} />
-          </label>
-          <label className="label">
-            Where are you based? <span className="opt">(optional)</span>
-            <input className="input" autoComplete="country-name" maxLength={80} placeholder="e.g. Nairobi, London, Dallas" value={value.basedIn} onChange={set('basedIn')} />
-          </label>
+          <PhoneNumberField name="phone" label="Phone number" required initialValue={value.phone} onValueChange={phone => onChange({ ...value, phone })} />
+          <PhoneNumberField name="whatsapp" label="WhatsApp number" initialValue={value.whatsapp} onValueChange={whatsapp => onChange({ ...value, whatsapp })} />
+          <div className="sm:col-span-2"><LocationFields initialCountry={value.countryCode} initialRegion={value.regionCode} onValueChange={location => onChange({ ...value, ...location })} /></div>
           <label className="label sm:col-span-2">
             Password
             <input className="input" type="password" autoComplete="new-password" required minLength={10} maxLength={200} value={value.password} onChange={set('password')} />

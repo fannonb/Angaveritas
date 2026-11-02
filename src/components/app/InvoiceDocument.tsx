@@ -1,6 +1,7 @@
 import { invoiceStateLabels, type InvoiceDoc } from '@/lib/data/invoices'
 import { formatPhone, site } from '@/lib/site'
 import { fmtDate } from './format'
+import { paystackEnabled } from '@/lib/paystack'
 
 // The invoice as a printable sheet. It mirrors the PDF (lib/invoice-pdf.ts); change both together.
 const money = (n: number) => `KES ${Math.round(n).toLocaleString('en-US')}`
@@ -94,8 +95,9 @@ export default function InvoiceDocument({ inv }: { inv: InvoiceDoc }) {
           <p className="invoice__label">How to pay</p>
           {mpesaPaybill && <p><strong>M-Pesa Paybill {mpesaPaybill}</strong>, account <strong>{inv.code}</strong></p>}
           {bankDetails && <p>Bank transfer: {bankDetails}</p>}
-          {!mpesaPaybill && !bankDetails && <p>Your analyst will send payment details. Pay only through official AngaVeritas channels.</p>}
-          <p className="invoice__hint">Always quote {inv.code} as the reference, then tell us in your dashboard under Payments.</p>
+          {paystackEnabled() && <p>Pay your deposit or balance securely through Payments in your client portal. Checkout payments are confirmed automatically.</p>}
+          {!paystackEnabled() && !mpesaPaybill && !bankDetails && <p>Your analyst will send payment details. Pay only through official AngaVeritas channels.</p>}
+          <p className="invoice__hint">For payments outside checkout, quote {inv.code} as the reference, then tell us in your dashboard under Payments.</p>
         </section>
       )}
 

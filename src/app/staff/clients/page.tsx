@@ -33,7 +33,7 @@ export default async function ClientsPage({ searchParams: searchParamsPromise }:
                   {!c.email_verified_at && <span className="block text-xs text-warn">Email not confirmed</span>}
                   {c.disabled_at && <span className="block text-xs text-bad">Disabled</span>}
                 </td>
-                <td className="dim text-sm">{c.email}<span className="block">{c.phone ?? ''}</span></td>
+                <td className="dim text-sm">{c.email}{c.phone && <span className="block">Phone: {c.phone}</span>}{c.whatsapp && <span className="block">WhatsApp: {c.whatsapp}</span>}</td>
                 <td className="dim">{c.based_in ?? '—'}</td>
                 <td className="num">{c.requests}</td>
                 <td className="num">{c.active_projects} active / {c.projects}</td>

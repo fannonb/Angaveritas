@@ -3,6 +3,7 @@ import { sql, withActor } from '@/lib/db'
 import type { SessionUser } from '@/lib/auth/session'
 import type { Health, ProjectStage } from '@/lib/labels'
 import { TECHNICAL_EVENT_PATTERN } from '@/lib/workflow'
+import { briefAnswers, briefProfile } from '@/lib/service-briefs'
 
 export type ProjectRow = {
   id: string
@@ -13,6 +14,7 @@ export type ProjectRow = {
   title: string
   service_code: string | null
   service_name: string | null
+  service_brief: import('@/lib/service-briefs').ServiceBriefRecord | Record<string, never>
   engagement: 'one_off' | 'retainer'
   stage: ProjectStage
   health: Health
@@ -94,7 +96,13 @@ export async function projectFor(user: Pick<SessionUser, 'id' | 'role'>, id: str
   const assigned =
     project.field_agent_id === user.id ||
     (await sql`select 1 from inspections where project_id = ${id} and agent_id = ${user.id} limit 1`).length > 0
-  return assigned ? { project, isClient: false, canManage: false, canFieldwork: true } : null
+  if (!assigned) return null
+  // Redact before constructing any page/component props, including RSC debug data.
+  const profile = briefProfile(project)
+  const answers = briefAnswers(profile, project.service_brief)
+  for (const field of profile.fields) if (field.sensitive) delete answers[field.key]
+  project.service_brief = {version:1,profile:profile.code,answers}
+  return { project, isClient: false, canManage: false, canFieldwork: true }
 }
 
 export async function projectByCodeFor(user: SessionUser, code: string) {
@@ -149,13 +157,14 @@ export async function projectStageCounts() {
 export async function saveOnboarding(
   projectId: string,
   clientId: string,
-  o: { title: string; locationLabel: string | null; county: string | null; siteDirections: string | null; siteAccessNotes: string | null; claims: string | null; concerns: string | null; investmentValueKes: number | null },
+  o: { title: string; locationLabel: string | null; county: string | null; siteDirections: string | null; siteAccessNotes: string | null; claims: string | null; concerns: string | null; investmentValueKes: number | null; serviceBrief?: import('@/lib/service-briefs').ServiceBriefRecord },
 ) {
   await withActor(clientId, async sql => sql`
     update projects set title = ${o.title}, location_label = ${o.locationLabel}, county = ${o.county},
       site_directions = ${o.siteDirections}, site_access_notes = ${o.siteAccessNotes}, claims = ${o.claims},
-      concerns = ${o.concerns}, investment_value_kes = ${o.investmentValueKes}
-    where id = ${projectId} and client_id = ${clientId}`)
+      concerns = ${o.concerns}, investment_value_kes = ${o.investmentValueKes},
+      service_brief = ${o.serviceBrief ? sql.json(o.serviceBrief) : sql`service_brief`}
+    where id = ${projectId} and client_id = ${clientId} and stage in ('onboarding', 'planning')`)
 }
 
 export async function submitOnboarding(projectId: string, clientId: string) {

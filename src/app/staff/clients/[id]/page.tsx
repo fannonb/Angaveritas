@@ -7,6 +7,7 @@ import { listProjectsForStaff } from '@/lib/data/projects'
 import { listRequests } from '@/lib/data/requests'
 import { getUserById } from '@/lib/data/users'
 import { setDisabledAction } from '../../actions'
+import { telHref, waHref } from '@/lib/site'
 
 export const metadata = { title: 'Client' }
 
@@ -37,7 +38,8 @@ export default async function ClientPage({ params: paramsPromise }: { params: Pr
         <section className="panel panel-pad">
           <dl className="kv">
             <dt>Email</dt><dd><a href={`mailto:${c.email}`}>{c.email}</a>{c.email_verified_at ? '' : ' (not confirmed)'}</dd>
-            <dt>Phone</dt><dd>{c.phone ?? '—'}</dd>
+            <dt>Phone</dt><dd>{c.phone ? <a href={telHref(c.phone)}>{c.phone}</a> : '—'}</dd>
+            <dt>WhatsApp</dt><dd>{c.whatsapp ? <a href={waHref(c.whatsapp)} target="_blank" rel="noopener noreferrer">{c.whatsapp}</a> : 'Not provided'}</dd>
             <dt>Based in</dt><dd>{c.based_in ?? '—'}</dd>
             <dt>Time zone</dt><dd>{c.timezone}</dd>
             <dt>Last sign-in</dt><dd>{fmtDateTime(c.last_login_at)}</dd>

@@ -6,7 +6,7 @@ import { projectFor } from '@/lib/data/projects'
 import { cancelInvoice, issueInvoice, recordPayment, configureMonitoring, dispatchMonitoringCycle, generateMonitoringCycles, reissueCycleInvoice, reopenProject, resolveServiceRequest } from '@/lib/data/operations'
 import { emailInvoice } from '@/lib/invoice-send'
 import { sql, withActor } from '@/lib/db'
-import { logEvent, notifyUser } from '@/lib/activity'
+import { logEvent, notifyTeam, notifyUser } from '@/lib/activity'
 import { formText } from '@/lib/validation'
 export async function staffOperationsAction(form: FormData) {
   const user = await requireStaff(['analyst','admin'])
@@ -26,6 +26,9 @@ export async function staffOperationsAction(form: FormData) {
       case 'payment': {
         const kind = text('kind') === 'refund' ? 'refund' : 'payment'
         await recordPayment(p.id,user.id,{invoiceId:text('invoiceId'),amount:num('amount'),kind,reference:text('reference'),note:text('note'),noticeId:text('noticeId') || undefined})
+        // A payment entered without a client's own payment notification rests on one person's word, so admins see it.
+        if (kind === 'payment' && !text('noticeId') && user.role !== 'admin')
+          await notifyTeam({title:`${p.code}: payment of KES ${num('amount').toLocaleString('en-US')} entered by ${user.full_name}`,body:`Reference ${text('reference')}. No client payment notification matched it. Check it against the bank or M-Pesa statement.\nNote: ${text('note')}`,href:`/staff/projects/${p.code}?tab=operations`,staffIds:[user.id]})
         // The updated invoice is the client's receipt. Sending it never undoes the recorded entry.
         await emailInvoice(text('invoiceId'),p.id,user.id,kind,num('amount')).catch((e) => console.error('[invoice] email failed', e))
         break
@@ -33,6 +36,9 @@ export async function staffOperationsAction(form: FormData) {
       case 'send_invoice': await emailInvoice(text('invoiceId'),p.id,user.id,'resend'); break
       case 'cancel_invoice': {
         const [invoice] = await sql`select code from invoices where id=${text('invoiceId')} and project_id=${p.id}`
+        // Once a report is published, cancelling an unpaid invoice releases it like a waiver does.
+        if (user.role !== 'admin' && (await sql`select 1 from reports where project_id=${p.id} and status='published' limit 1`).length)
+          throw new Error('Only an admin can cancel an invoice after a report is published.')
         await cancelInvoice(p.id,user.id,text('invoiceId'),text('reason'))
         await notifyUser(p.client_id,{title:`Invoice ${invoice?.code ?? ''} cancelled: ${p.title}`,body:`Reason: ${text('reason')}
 Nothing is owed on this invoice.`,href:`/portal/projects/${p.code}?tab=operations`})

@@ -1,3 +1,4 @@
+import { briefProfile, briefStageLabels } from '@/lib/service-briefs'
 import Link from 'next/link'
 import { PageHeader } from '@/components/app/AppTopbar'
 import { HealthChip, ProjectMap, RequestChip, Timeline } from '@/components/app/bits'
@@ -42,12 +43,14 @@ function AllCaughtUp({ completed }: { completed: number }) {
 
 // The project the client is most concerned with, with the one thing that happens next.
 function ProjectHero({ p }: { p: ClientProject }) {
+  const profile = briefProfile(p)
+  const labels = briefStageLabels(profile)
   const done = p.stage === 'closed'
   const at = progress(p.stage)
   const next = done
     ? 'Complete. Your reports, messages and payment records stay available. Ask for a follow-up whenever you need more work.'
     : p.next_inspection
-      ? `Next site visit ${fmtDate(p.next_inspection)}. We share photos and findings once the visit is reviewed.`
+      ? `Next ${profile.activity.toLowerCase()} ${fmtDate(p.next_inspection)}. We share photos and findings once the visit is reviewed.`
       : p.published_reports > 0
         ? 'Your report is published. Open the project for the findings and any balance still due.'
         : 'Your analyst is working on the next step. Messages and updates appear here.'
@@ -59,13 +62,13 @@ function ProjectHero({ p }: { p: ClientProject }) {
           <h2 id="current-project" className="mt-1 text-xl">{p.title}</h2>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <span className={`chip ${done ? 'chip--ok' : 'chip--info'}`}>{done ? 'Complete' : clientStageLabels[p.stage]}</span>
+          <span className={`chip ${done ? 'chip--ok' : 'chip--info'}`}>{done ? 'Complete' : (labels[p.stage] ?? clientStageLabels[p.stage])}</span>
           {!done && <HealthChip health={p.health} />}
         </div>
       </div>
       {!done && (
         <div className="flex items-center gap-3">
-          <span className="meter flex-1" role="progressbar" aria-valuenow={at.step} aria-valuemin={1} aria-valuemax={at.of} aria-label={`Step ${at.step} of ${at.of}: ${clientStageLabels[p.stage]}`}>
+          <span className="meter flex-1" role="progressbar" aria-valuenow={at.step} aria-valuemin={1} aria-valuemax={at.of} aria-label={`Step ${at.step} of ${at.of}: ${(labels[p.stage] ?? clientStageLabels[p.stage])}`}>
             <span style={{ width: `${at.pct}%` }} />
           </span>
           <span className="shrink-0 text-xs font-semibold text-ink-2">{at.step}/{at.of}</span>
@@ -108,8 +111,8 @@ export default async function Dashboard({ searchParams: searchParamsPromise }: {
   // Things only the client can move forward.
   const todo: { href: string; title: string; text: string; icon: string }[] = [
     ...requests.filter((r) => r.status === 'proposal_sent').map((r) => ({ href: `/portal/requests/${r.reference}`, title: `Review your proposal for ${r.title}`, text: 'Accept online to start the work, or ask us a question.', icon: 'report' })),
-    ...projects.filter((p) => p.stage !== 'closed' && (!p.onboarding_submitted_at || !p.data_consent_at)).map((p) => ({ href: `/portal/projects/${p.code}?tab=onboarding`, title: `Review site details and consent for ${p.title}`, text: 'Confirm the location, what we should check and your permission to carry out the work.', icon: 'pin' })),
-    ...deposits.filter((d) => !d.payment_notified).map((d) => ({ href: `/portal/projects/${d.project_code}?tab=operations`, title: `Pay ${kes(d.due_kes)} for ${d.project_title}`, text: `We book the site visit once it arrives. Use invoice ${d.invoice_code} as the reference.`, icon: 'wallet' })),
+    ...projects.filter((p) => p.stage !== 'closed' && (!p.onboarding_submitted_at || !p.data_consent_at)).map((p) => ({ href: `/portal/projects/${p.code}?tab=onboarding`, title: `Review ${briefProfile(p).tab.toLowerCase()} and consent for ${p.title}`, text: 'Complete the service brief, your priorities and permission to carry out the work.', icon: 'pin' })),
+    ...deposits.filter((d) => !d.payment_notified).map((d) => ({ href: `/portal/projects/${d.project_code}?tab=operations`, title: `Pay ${kes(d.due_kes)} for ${d.project_title}`, text: `We confirm the work plan once it arrives. Use invoice ${d.invoice_code} as the reference.`, icon: 'wallet' })),
     ...projects.filter((p) => p.nda_status === 'prepared').map((p) => ({ href: `/portal/projects/${p.code}?tab=agreement`, title: `Sign the confidentiality agreement for ${p.title}`, text: 'Your agreement is ready. Review and sign it before fieldwork starts.', icon: 'review' })),
     ...toRead.map((r) => ({ href: `/portal/projects/${r.project_code}/reports/${r.id}`, title: `Your report is ready: ${r.project_title}`, text: 'Read the findings and our recommendation.', icon: 'report' })),
     ...(unread && unreadHref ? [{ href: unreadHref, title: `${unread} unread message${unread > 1 ? 's' : ''} from your analyst`, text: unread > 1 ? 'Opens the latest conversation. Others are marked in your projects and requests.' : 'Open the conversation to reply.', icon: 'message' }] : []),
@@ -158,7 +161,7 @@ export default async function Dashboard({ searchParams: searchParamsPromise }: {
           <h2 className="text-xl">Start with an estimate</h2>
           <p className="mt-2 max-w-2xl text-ink-2">
             Tell us what you need checked and where. You get an itemised estimate straight away; we then send a proposal you can
-            accept here. After that you follow every step: the site visit, the evidence and the final report.
+            accept here. After that you follow every step: the fieldwork, the evidence and the final report.
           </p>
           <ol className="steps steps--4 mt-6">
             <li><h3>Estimate</h3><p>Six quick steps, itemised.</p></li>

@@ -8,6 +8,7 @@ import postgres from 'postgres'
 import { chromium } from 'playwright'
 
 try { process.loadEnvFile('.env.local') } catch {}
+if (!['127.0.0.1','localhost','[::1]'].includes(new URL(process.env.DATABASE_URL).hostname)) throw new Error('Workflow tests require a local database')
 const schema = `av_e2e_${Date.now()}`
 const port = Number(process.env.WORKFLOW_TEST_PORT || 3100)
 const origin = `http://localhost:${port}`
@@ -55,6 +56,7 @@ try {
   db = postgres(url.toString(), { max: 1, onnotice() {} })
   for (const file of fs.readdirSync('supabase/migrations').filter(f => f.endsWith('.sql')).sort())
     await db.unsafe(fs.readFileSync(path.join('supabase/migrations', file), 'utf8'))
+  await db.unsafe("alter table users alter column country_code set default 'KE', alter column region_code set default '30'")
   for (const demo of demos) {
     await db`insert into users ${db(demo)}`
     users[demo.role] = demo
@@ -66,7 +68,7 @@ try {
     values (${foreign.id},'client_document','document','private.txt','text/plain',7,'private','ready',${other.id}) returning id`
   server = spawn(process.execPath, ['node_modules/next/dist/bin/next', production ? 'start' : 'dev', '-p', String(port)], {
     cwd: process.cwd(), windowsHide: true,
-    env: { ...process.env, DATABASE_URL: url.toString(), NEXT_DIST_DIR: production ? '.next-production' : '.next-workflow', APP_URL: origin,
+    env: { ...process.env, DATABASE_URL: url.toString(), NEXT_DIST_DIR: process.env.WORKFLOW_TEST_DIST_DIR || (production ? '.next-production' : '.next-workflow'), APP_URL: origin,
       STORAGE_DRIVER: 'local', STORAGE_DIR: path.join(results, 'storage'), RESEND_API_KEY: '',
       NOTIFY_EMAIL: 'team@test.invalid', FILE_SCAN_URL: '', WORKER_SECRET: '', WORKER_USER_ID: '' },
     stdio: ['ignore','pipe','pipe'],
@@ -180,13 +182,15 @@ try {
     assert.equal(invoice.amount_kes, 10000)
   })
   await check('client completes onboarding and uploads a document', async () => {
+    await field(client,'service.subject','Physical existence and site access')
     await field(client,'locationLabel','Kitengela')
-    await field(client,'siteDirections','Meet at the main gate in Kitengela.')
+    await field(client,'siteAccessNotes','Meet at the main gate in Kitengela.')
     await click(client,'Continue')
+    await field(client,'service.outcomes','Decide whether to proceed with the investment.')
     await field(client,'claims','The site exists and has road access.')
     await click(client,'Continue')
     await client.locator('[name="consent"]').check()
-    await click(client,'Send site details')
+    await click(client,'Send engagement brief')
     assert.equal((await db`select stage from projects where id=${projectId}`)[0].stage,'planning')
     const start=await api(client,'/api/files',{projectId,category:'client_document',filename:'brief.txt',mime:'text/plain',size:12})
     assert.equal(start.status,201)
@@ -269,6 +273,8 @@ try {
     evidenceId=start.body.fileId
     assert.equal((await agent.request.put(origin+start.body.upload.url,{headers:{Origin:origin,'Content-Type':'image/png'},data:image})).status(),200)
     assert.equal((await api(agent,`/api/files/${evidenceId}/complete`,{})).status,200)
+    // Explicitly exercise the manual integrity-review branch; a PNG without EXIF is not itself a flagged file.
+    await db`update files set integrity_flag='Synthetic metadata discrepancy for review test' where id=${evidenceId}`
     await agent.reload()
     const checkForms=agent.locator('form').filter({has:agent.locator('[name="checkId"]')})
     for (let c=0;c<await checkForms.count();c++) {
@@ -280,9 +286,9 @@ try {
       await agent.waitForLoadState('networkidle')
     }
     await agent.locator('summary').filter({hasText:'Add an additional finding'}).click()
-    await field(agent,'area','Physical existence')
-    await field(agent,'observation','The site and access road were observed during the visit.')
-    const findingForm=agent.locator('form').filter({has:agent.locator('[name="area"]')})
+    const findingForm=agent.locator('form').filter({has:agent.getByRole('button',{name:'Add finding',exact:true})})
+    await findingForm.locator('[name="area"]').fill('Physical existence')
+    await findingForm.locator('[name="observation"]').fill('The site and access road were observed during the visit.')
     assert.equal(await findingForm.locator('[name="confidence"]').inputValue(),'')
     await findingForm.locator('[name="status"]').selectOption('warn')
     assert.equal(await findingForm.locator('[name="riskCategory"]').getAttribute('required'),'')
@@ -312,12 +318,16 @@ try {
     assert.equal((await db`select status from inspections where id=${inspectionId}`)[0].status,'reviewed')
     await analyst.goto(origin+`/staff/projects/${code}?tab=evidence`)
     const form=analyst.locator('form').filter({has:analyst.locator(`[name="fileId"][value="${evidenceId}"]`)}).first()
+    await form.locator('summary').filter({hasText:'QA Review'}).click()
     await form.locator('[name="visible"]').check()
     await form.locator('[name="qaNote"]').fill('Manual review: local test image, metadata absence acknowledged.')
-    await form.getByRole('button',{name:'Save',exact:true}).click()
+    await form.getByRole('button',{name:'Update review',exact:true}).click()
     await analyst.waitForLoadState('networkidle')
     assert.equal((await db`select visible_to_client from files where id=${evidenceId}`)[0].visible_to_client,true)
-    assert.equal((await client.request.get(origin+`/api/files/${evidenceId}`)).status(),200)
+    // Released, but the balance is still owed: the client sees neither the photo nor the findings yet.
+    assert.equal((await client.request.get(origin+`/api/files/${evidenceId}`)).status(),404)
+    await client.goto(origin+`/portal/projects/${code}?tab=inspections`)
+    assert.match(await client.locator('body').innerText(),/findings open once the remaining balance/i)
   })
   await check('analyst writes report; author cannot publish their own report', async () => {
     await analyst.goto(origin+`/staff/projects/${code}?tab=reports`)
@@ -367,6 +377,7 @@ try {
     await balanceNotice.getByRole('button',{name:'Confirm funds and record payment'}).click()
     await admin.waitForLoadState('networkidle')
     assert.equal((await db`select count(*)::int n from payment_notices where project_id=${projectId} and status='pending'`)[0].n,0)
+    assert.equal((await client.request.get(origin+`/api/files/${evidenceId}`)).status(),200,'Evidence opens once the balance is paid')
     await client.goto(origin+`/portal/projects/${code}/reports/${reportId}`)
     assert.match(await client.locator('body').innerText(),/physical site and road access were verified/i)
     await shot(client,'client-delivered-report')
@@ -404,6 +415,10 @@ try {
     assert.equal((await db`select count(*)::int n from projects where client_id=${users.client.id}`)[0].n,count)
     assert.equal((await db`select count(*)::int n from invoices where project_id=${projectId}`)[0].n,2)
     assert.equal((await db`select payment_status from projects where id=${projectId}`)[0].payment_status,'awaiting_payment')
+    // Isolate the following consent regression from the newly-created follow-up balance.
+    const openInvoices=await db`select i.id,i.amount_kes-coalesce((select sum(case when kind='payment' then amount_kes else -amount_kes end) from payments where invoice_id=i.id),0)::int as due from invoices i where i.project_id=${projectId} and i.status='issued'`
+    for(const invoice of openInvoices)if(invoice.due>0)await db`insert into payments(invoice_id,amount_kes,kind,provider,reference,note,recorded_by) values (${invoice.id},${invoice.due},'payment','manual',${'E2E-followup-'+invoice.id},'Synthetic follow-up settlement before consent check',${users.admin.id})`
+    assert.equal((await db`select client_reports_unlocked(${projectId}) as unlocked`)[0].unlocked,true)
   })
   await check('consent withdrawal blocks further collection on an existing inspection', async () => {
     await admin.goto(origin+`/staff/inspections/${inspectionId}`)
@@ -441,6 +456,7 @@ try {
     assert.equal((await db`select status from reports where id=${reportId}`)[0].status,'withdrawn')
   })
   await check('an unowned request is claimed by the analyst who sends the proposal', async () => {
+    await client.evaluate(() => sessionStorage.removeItem('av-estimate-v2'))
     await client.goto(origin + '/estimate')
     await client.getByLabel('Something else', { exact: false }).check()
     await click(client, 'Continue')

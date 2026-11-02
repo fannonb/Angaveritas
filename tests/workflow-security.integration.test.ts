@@ -45,6 +45,7 @@ describe.skipIf(process.env.RUN_DATABASE_TESTS !== '1')('workflow boundary regre
     state.sql = postgres(process.env.DATABASE_URL!, { max: 3, connection: { search_path: `${schema},public` }, onnotice: () => {} })
     for (const file of fs.readdirSync('supabase/migrations').filter(f => f.endsWith('.sql')).sort())
       await state.sql.unsafe(fs.readFileSync(path.join('supabase/migrations',file),'utf8'))
+    await state.sql.unsafe("alter table users alter column country_code set default 'KE', alter column region_code set default '30'")
     const user = async (role: string) => (await state.sql`insert into users(email,full_name,role) values (${`${role}@security.invalid`},${role},${role}::user_role) returning id`)[0].id as string
     client = await user('client'); agent = await user('field_agent'); analyst = await user('analyst'); admin = await user('admin')
   }, 30000)
@@ -355,6 +356,28 @@ describe.skipIf(process.env.RUN_DATABASE_TESTS !== '1')('workflow boundary regre
     expect(p.monitoring_accepted_at).toBeNull()
     expect(p.monitoring_accepted_version).toBeNull()
     expect(await generateMonitoringCycles(analyst)).toBe(0)
+  })
+  it('keeps reviewed evidence from the client until the balance is paid, before any report is published', async () => {
+    const x = await fixture()
+    await state.sql`update inspections set status='submitted' where id=${x.i}`
+    await state.sql`update inspections set status='reviewed',reviewed_by=${analyst} where id=${x.i}`
+    await state.sql`update files set visible_to_client=true where id=${x.e}`
+    const invoiceId = await issueInvoice(x.p, admin, { label: 'Balance', amount: 1000, deposit: 0, dueOn: null, beyondContract: true })
+    expect(await mayReadFile({id:client,role:'client'},(await getFile(x.e))!)).toBe(false)
+    await recordPayment(x.p, admin, { invoiceId, amount: 1000, kind: 'payment', reference: 'EVIDENCE-LOCK-PAID', note: 'Balance received' })
+    expect(await mayReadFile({id:client,role:'client'},(await getFile(x.e))!)).toBe(true)
+  })
+  it('does not reveal that another client already used a payment reference', async () => {
+    const x = await fixture()
+    const y = await fixture()
+    const mine = await issueInvoice(x.p, admin, { label: 'Mine', amount: 1000, deposit: 0, dueOn: null, beyondContract: true })
+    const theirs = await issueInvoice(y.p, admin, { label: 'Theirs', amount: 1000, deposit: 0, dueOn: null, beyondContract: true })
+    const [other] = await state.sql`insert into users(email,full_name,role) values ('other-ref@security.invalid','Other','client') returning id`
+    await state.sql`update projects set client_id=${other.id} where id=${y.p}`
+    await submitPaymentNotice(y.p, other.id, { invoiceId: theirs, amount: 1000, reference: 'SHARED-REF-1', note: '' })
+    const attempt = submitPaymentNotice(x.p, client, { invoiceId: mine, amount: 1000, reference: 'shared-ref-1', note: '' })
+    await expect(attempt).rejects.toThrow(/could not record/i)
+    await expect(attempt).rejects.not.toThrow(/already been sent/i)
   })
   it('loads actionable personal and team queues against the real schema', async () => {
     const team = await staffWorkQueue(analyst,true)

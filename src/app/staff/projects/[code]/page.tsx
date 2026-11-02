@@ -1,3 +1,5 @@
+import { briefProfile, briefStageLabels, suggestedChecks } from '@/lib/service-briefs'
+import ServiceBriefSummary from '@/components/app/ServiceBriefSummary'
 import OperationsPanel from '@/components/app/OperationsPanel'
 import { sql } from '@/lib/db'
 import Link from 'next/link'
@@ -38,6 +40,8 @@ export default async function StaffProject({ params: paramsPromise, searchParams
   const access = await projectByCodeFor(user, params.code)
   if (!access) notFound()
   const p = access.project
+  const profile = briefProfile(p)
+  const journeyLabels = briefStageLabels(profile)
   const sites = await sql`select id,label from project_sites where project_id=${p.id} order by primary_site desc,label`
   const allowed: readonly Tab[] = access.canManage ? ALL : ['site', 'inspections', 'evidence']
   const wanted = (moved[searchParams.tab ?? ''] ?? searchParams.tab) as Tab
@@ -62,7 +66,7 @@ export default async function StaffProject({ params: paramsPromise, searchParams
   const next = access.canManage ? staffNextStep(p, inspections, reports, flagged, unpaid.reduce((s, u) => s + u.unpaid_kes, 0)) : null
   const labels: Record<Tab, string> = {
     overview: 'Overview',
-    site: 'Site & files',
+    site: `${profile.tab} & files`,
     inspections: `Inspections (${inspections.length})`,
     evidence: flagged ? `Evidence (${evidence.length}, ${flagged} to check)` : `Evidence (${evidence.length})`,
     reports: `Reports (${reports.length})`,
@@ -101,11 +105,11 @@ export default async function StaffProject({ params: paramsPromise, searchParams
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <HealthChip health={p.health} />
-          <StageChip stage={p.stage} />
+          <StageChip stage={p.stage} label={journeyLabels[p.stage]} />
           {access.canManage && <span className="chip chip--plain chip--none">{paymentStatusLabels[p.payment_status]}</span>}
         </div>
       </div>
-      <section className="panel panel-pad"><StageTracker stage={p.stage} retainer={p.engagement === 'retainer'} /></section>
+      <section className="panel panel-pad"><StageTracker stage={p.stage} retainer={p.engagement === 'retainer'} labels={journeyLabels} /></section>
       {next && (
         <section className="next-step" aria-label="Next step">
           <div>
@@ -177,19 +181,21 @@ export default async function StaffProject({ params: paramsPromise, searchParams
       {tab === 'site' && (
         <div className="grid gap-6 xl:grid-cols-2 xl:items-start">
           <section className="panel panel-pad">
-            <h2 className="text-lg">Site and brief</h2>
+            <h2 className="text-lg">{profile.title}</h2>
+            <div className="mt-4"><ServiceBriefSummary context={p} value={p.service_brief} includeSensitive={access.canManage} /></div>
             <dl className="kv mt-3">
-              <dt>Location</dt><dd>{p.location_label ?? '—'}{p.county ? `, ${p.county}` : ''}{p.location_lat != null && <> · <a href={`https://www.openstreetmap.org/?mlat=${p.location_lat}&mlon=${p.location_lng}#map=15/${p.location_lat}/${p.location_lng}`} target="_blank" rel="noopener noreferrer">map</a></>}</dd>
-              <dt>Directions</dt><dd>{p.site_directions ?? '—'}</dd>
-              <dt>Access</dt><dd>{p.site_access_notes ?? '—'}</dd>
-              <dt>Claims to verify</dt><dd>{p.claims ?? '—'}</dd>
+              <dt>{profile.location}</dt><dd>{p.location_label ?? '—'}{p.county ? `, ${p.county}` : ''}{p.location_lat != null && <> · <a href={`https://www.openstreetmap.org/?mlat=${p.location_lat}&mlon=${p.location_lng}#map=15/${p.location_lat}/${p.location_lng}`} target="_blank" rel="noopener noreferrer">map</a></>}</dd>
+              <dt>{profile.directions || 'Location notes'}</dt><dd>{p.site_directions ?? '—'}</dd>
+              <dt>{profile.access}</dt><dd>{p.site_access_notes ?? '—'}</dd>
+              <dt>{profile.claims}</dt><dd>{p.claims ?? '—'}</dd>
               <dt>Client concerns</dt><dd>{p.concerns ?? '—'}</dd>
               {access.canManage && <><dt>Planning notes</dt><dd>{p.planning_notes ?? '—'}</dd></>}
             </dl>
           </section>
           <div className="space-y-6">
             <section className="panel panel-pad space-y-3">
-              <h2 className="text-lg">People at the site</h2>
+              <h2 className="text-lg">{profile.people}</h2>
+              <p className="hint">{profile.peopleHint}</p>
               {contacts.length === 0 && <p className="text-ink-2">None added.</p>}
               <ul className="divide-y divide-line">
                 {contacts.map((c) => (
@@ -224,7 +230,7 @@ export default async function StaffProject({ params: paramsPromise, searchParams
               </details>
             </section>
             <section className="panel panel-pad space-y-3">
-              <h2 className="text-lg">Client documents</h2>
+              <h2 className="text-lg">Client documents</h2><ul className="list-disc pl-5 text-sm text-ink-2">{profile.documents.map(item => <li key={item}>{item}</li>)}</ul>
               <DocumentList files={clientDocs} controls={access.canManage ? f => <FileControls f={f} canManage /> : undefined} />
             </section>
             {access.canManage && (
@@ -243,10 +249,10 @@ export default async function StaffProject({ params: paramsPromise, searchParams
         <div className="space-y-6">
           {access.canManage && (
             <section className="panel panel-pad">
-              <h2 className="text-lg">Schedule a site visit</h2>
+              <h2 className="text-lg">Plan {profile.activity.toLowerCase()}</h2>
               <form action={createInspectionAction} className="mt-3 grid gap-3 md:grid-cols-[1.5fr_1fr_1fr_auto] md:items-end">
                 <input type="hidden" name="projectId" value={p.id} />
-                <label className="label">Title<input className="input" name="title" defaultValue={inspections.length ? `Follow-up visit ${inspections.length + 1}` : 'Initial site verification'} maxLength={200} /></label>
+                <label className="label">Title<input className="input" name="title" defaultValue={inspections.length ? `Follow-up visit ${inspections.length + 1}` : profile.activity} maxLength={200} /></label>
                 <label className="label">Date<input className="input" type="date" name="scheduledFor" /></label>
                 <label className="label">
                   Field agent
@@ -256,9 +262,10 @@ export default async function StaffProject({ params: paramsPromise, searchParams
                   </select>
                 </label>
                 <label className="label">Site<select className="input" name="siteId"><option value="">Primary project location</option>{sites.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}</select></label>
+                <label className="label md:col-span-full">Proposed checks<textarea className="input" name="objectives" defaultValue={suggestedChecks(profile,p.claims)} maxLength={8000} /></label>
                 <button className="btn btn-primary" type="submit">Schedule</button>
               </form>
-              <p className="hint mt-2">The client&apos;s claims are copied into the field checklist. The client is told the date.</p>
+              <p className="hint mt-2">Review these suggested checks against the accepted scope and brief before scheduling. One check per line. Contact permissions still apply; the client is told the date.</p>
             </section>
           )}
           <section className="panel">

@@ -2,7 +2,7 @@
 
 import { notifyTeam } from '@/lib/activity'
 import { getUser, requestIpHash } from '@/lib/auth/session'
-import { createEnquiry, recentEnquiriesFromIp } from '@/lib/data/misc'
+import { createEnquiry, recentEnquiriesForEmail, recentEnquiriesFromIp } from '@/lib/data/misc'
 import { sendEmail } from '@/lib/email'
 import { enquirySchema } from '@/lib/validation'
 
@@ -26,6 +26,7 @@ export async function sendEnquiry(_: EnquiryState, form: FormData): Promise<Enqu
   const ipHash = await requestIpHash()
   if ((await recentEnquiriesFromIp(ipHash)) >= 5) return { error: 'Too many messages from your connection. Please email us instead.', values }
   const user = await getUser()
+  const earlier = await recentEnquiriesForEmail(e.email)
   await createEnquiry({ ...e, userId: user?.id ?? null, ipHash })
   await notifyTeam({
     title: `Website enquiry from ${e.name}`,
@@ -37,11 +38,16 @@ export async function sendEnquiry(_: EnquiryState, form: FormData): Promise<Enqu
       e.message,
     ].join('\n'),
     href: '/staff/enquiries',
+    replyTo: e.email,
   })
-  await sendEmail({
-    to: e.email,
-    subject: 'We have received your enquiry',
-    text: `Hello ${e.name.split(' ')[0]},\n\nThank you for contacting AngaVeritas. We will reply within one business day (East Africa Time).\n\nYour message:\n${e.message}`,
-  })
+  // The address is unverified, so the acknowledgement carries none of the visitor's words (name or message)
+  // and goes out at most once a day per address: the form cannot send someone else's text from our domain.
+  if (!earlier) {
+    await sendEmail({
+      to: e.email,
+      subject: 'We have received your enquiry',
+      text: 'Hello,\n\nThank you for contacting AngaVeritas. We will reply within one business day (East Africa Time).\n\nIf you did not send an enquiry, you can ignore this email.',
+    })
+  }
   return { ok: true }
 }

@@ -23,10 +23,10 @@ const compare = [
 ]
 
 const steps = [
-  ['Tell us what to check', 'Describe the land, business or project and where it is. The estimate takes a few minutes.'],
-  ['Agree the scope', 'We send a formal proposal. Scope and price are agreed there, before any work starts.'],
-  ['We visit the site', 'Our field agent collects photos, video, GPS records and interviews.'],
-  ['Get your report', 'A second person reviews it, then you read the findings and recommendation in your dashboard.'],
+  ['Tell us what you need to know', 'Choose the service that fits: checking land or a supplier, looking into a business, testing an idea or monitoring a project. The estimate takes a few minutes.'],
+  ['Agree the scope', 'We send a formal proposal with the scope, the price and the timeline. Nothing starts until you accept it.'],
+  ['We do the fieldwork', 'Our team goes to the ground: site visits, interviews, local research and document checks. Every finding is backed by evidence such as photos, video, GPS or records.'],
+  ['Get your decision', 'A second person checks the work before it is released. You receive findings, risk ratings and a recommendation in your dashboard.'],
 ]
 
 const inReport = [
@@ -154,7 +154,7 @@ export default async function Home() {
             <div>
               <p className="home-eyebrow">How it works</p>
               <h2>From your question to a decision</h2>
-              <p>Most reports are delivered in 5–10 business days. Priority and Express options are available when we have the capacity.</p>
+              <p>Most one-off reports are delivered in 5–10 business days. Priority and Express options are available when we have the capacity.</p>
             </div>
             <Link className="text-link" href="/how-it-works">More about our method</Link>
           </div>

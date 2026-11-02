@@ -42,8 +42,8 @@ export function RequestChip({ status, client }: { status: RequestStatus; client?
   return <Chip status={requestChip[status]}>{label}</Chip>
 }
 
-export function StageChip({ stage, client }: { stage: ProjectStage; client?: boolean }) {
-  return <Chip status={stage === 'closed' ? 'none' : stage === 'delivered' ? 'ok' : 'info'}>{(client ? clientStageLabels : stageLabels)[stage]}</Chip>
+export function StageChip({ stage, client, label }: { stage: ProjectStage; client?: boolean; label?: string }) {
+  return <Chip status={stage === 'closed' ? 'none' : stage === 'delivered' ? 'ok' : 'info'}>{label ?? (client ? clientStageLabels : stageLabels)[stage]}</Chip>
 }
 
 export function FindingChip({ status }: { status: FindingStatus }) {
@@ -66,10 +66,10 @@ export function ReportChip({ status }: { status: ReportStatus }) {
 }
 
 /** Where the project is in the customer journey. */
-export function StageTracker({ stage, retainer, client }: { stage: ProjectStage; retainer?: boolean; client?: boolean }) {
+export function StageTracker({ stage, retainer, client, labels: overrides }: { stage: ProjectStage; retainer?: boolean; client?: boolean; labels?: Partial<Record<ProjectStage,string>> }) {
   const shown = projectStages.filter((s) => s !== 'closed' && (retainer || s !== 'monitoring'))
   const at = stage === 'closed' ? shown.length : shown.indexOf(stage)
-  const labels = client ? clientStageLabels : stageLabels
+  const labels = { ...(client ? clientStageLabels : stageLabels), ...overrides }
   return (
     <ol className="stages" style={{ ['--n' as string]: shown.length }} aria-label="Project stage">
       {shown.map((s, i) => (

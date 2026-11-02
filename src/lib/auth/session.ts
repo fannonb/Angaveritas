@@ -22,7 +22,10 @@ export type SessionUser = {
   full_name: string
   role: Role
   phone: string | null
+  whatsapp: string | null
   based_in: string | null
+  country_code: string | null
+  region_code: string | null
   timezone: string
   email_verified_at: Date | null
 }
@@ -48,13 +51,22 @@ export async function requestIpHash() {
   return hashIp(ip)
 }
 
-export async function createSession(user: { id: string; role: Role }) {
+export async function createSession(user: { id: string; role: Role }, expectedPasswordHash?: string | null) {
   const token = crypto.randomBytes(32).toString('base64url')
   const expires = new Date(Date.now() + SESSION_DAYS * 86400_000)
-  await sql`
-    insert into sessions (id, user_id, expires_at, ip_hash, user_agent)
-    values (${sha256(token)}, ${user.id}, ${expires}, ${await requestIpHash()}, ${(await headers()).get('user-agent')?.slice(0, 300) ?? null})`
-  await sql`update users set last_login_at = now() where id = ${user.id}`
+  const ipHash = await requestIpHash()
+  const userAgent = (await headers()).get('user-agent')?.slice(0, 300) ?? null
+  await sql.begin(async tx => {
+    // Serialize with disabling an account, so a concurrent sign-in cannot
+    // leave a session behind after the administrator has revoked access.
+    const [active] = await tx`select id,password_hash from users where id=${user.id} and disabled_at is null for update`
+    if (!active) throw new Error('Account is unavailable.')
+    if (expectedPasswordHash !== undefined && active.password_hash !== expectedPasswordHash) throw new Error('Credentials changed. Please sign in again.')
+    await tx`
+      insert into sessions (id, user_id, expires_at, ip_hash, user_agent)
+      values (${sha256(token)}, ${user.id}, ${expires}, ${ipHash}, ${userAgent})`
+    await tx`update users set last_login_at = now() where id = ${user.id}`
+  })
   const store = await cookies()
   store.set(SESSION_COOKIE, token, cookieOptions(SESSION_DAYS * 86400))
   store.set(HINT_COOKIE, isStaff(user) ? 'staff' : 'client', { ...cookieOptions(SESSION_DAYS * 86400), httpOnly: false })
@@ -66,7 +78,7 @@ export const getUser = cache(async (): Promise<SessionUser | null> => {
   if (!token || token.length > 100) return null
   const id = sha256(token)
   const [row] = await sql<(SessionUser & { expires_at: Date })[]>`
-    select u.id, u.email, u.full_name, u.role, u.phone, u.based_in, u.timezone, u.email_verified_at, s.expires_at
+    select u.id, u.email, u.full_name, u.role, u.phone, u.whatsapp, u.based_in, u.country_code, u.region_code, u.timezone, u.email_verified_at, s.expires_at
     from sessions s join users u on u.id = s.user_id
     where s.id = ${id} and s.expires_at > now() and u.disabled_at is null`
   if (!row) return null
@@ -119,14 +131,17 @@ export function safeNext(next: string | null | undefined, fallback: string) {
 
 // ---------- Brute-force protection ----------
 
+// Failures are counted per email from this connection, so someone guessing at an account locks out
+// themselves, not its owner. The higher per-email ceiling still stops guessing spread over many connections.
 export async function loginBlocked(email: string, ipHash: string) {
-  const [row] = await sql<{ by_email: number; by_ip: number }[]>`
+  const [row] = await sql<{ by_email_ip: number; by_email: number; by_ip: number }[]>`
     select
+      count(*) filter (where email = ${email} and ip_hash = ${ipHash} and not ok)::int as by_email_ip,
       count(*) filter (where email = ${email} and not ok)::int as by_email,
       count(*) filter (where ip_hash = ${ipHash} and not ok)::int as by_ip
     from login_attempts
     where created_at > now() - interval '15 minutes' and (email = ${email} or ip_hash = ${ipHash})`
-  return row.by_email >= 8 || row.by_ip >= 30
+  return row.by_email_ip >= 8 || row.by_ip >= 30 || row.by_email >= 50
 }
 
 export async function recordLogin(email: string, ipHash: string, ok: boolean) {

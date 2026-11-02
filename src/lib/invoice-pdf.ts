@@ -1,4 +1,5 @@
 import 'server-only'
+import { paystackEnabled } from '@/lib/paystack'
 import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from 'pdf-lib'
 import { invoiceStateLabels, type InvoiceDoc } from '@/lib/data/invoices'
 import { logoPng } from '@/lib/invoice-logo'
@@ -160,14 +161,16 @@ export async function invoicePdf(inv: InvoiceDoc): Promise<Uint8Array> {
     const rows: { s: string; font: PDFFont; size: number; color: ReturnType<typeof rgb> }[] = []
     if (mpesaPaybill) rows.push({ s: `M-Pesa Paybill ${mpesaPaybill}, account ${inv.code}`, font: bold, size: 9.5, color: C.ink })
     if (bankDetails) for (const l of wrap(`Bank transfer: ${bankDetails}`, regular, 9, W - 2 * M - 24).slice(0, 3)) rows.push({ s: l, font: regular, size: 9, color: C.ink2 })
-    if (!mpesaPaybill && !bankDetails) rows.push({ s: 'Your analyst will send payment details. Pay only through official AngaVeritas channels.', font: regular, size: 9, color: C.ink2 })
-    rows.push({ s: `Always quote ${inv.code} as the reference, then tell us in your dashboard under Payments.`, font: regular, size: 8.5, color: C.muted })
-    const boxH = 30 + rows.length * 13
+    if (paystackEnabled()) rows.push({ s: 'Pay your deposit or balance securely through Payments in your client portal. Checkout payments are confirmed automatically.', font: regular, size: 9, color: C.ink2 })
+    if (!paystackEnabled() && !mpesaPaybill && !bankDetails) rows.push({ s: 'Your analyst will send payment details. Pay only through official AngaVeritas channels.', font: regular, size: 9, color: C.ink2 })
+    rows.push({ s: `For payments outside checkout, quote ${inv.code} as the reference, then tell us in your dashboard under Payments.`, font: regular, size: 8.5, color: C.muted })
+    const wrappedRows = rows.flatMap(r => wrap(r.s,r.font,r.size,W-2*M-24).map(s => ({...r,s})))
+    const boxH = 30 + wrappedRows.length * 13
     ensure(boxH + 10)
     page.drawRectangle({ x: M, y: y - boxH + 12, width: W - 2 * M, height: boxH, borderColor: C.line, borderWidth: 0.75, color: rgb(1, 1, 1) })
     text('HOW TO PAY', M + 12, y - 4, { font: bold, size: 7.5, color: C.muted })
     let py = y - 20
-    for (const r of rows) { text(r.s, M + 12, py, { font: r.font, size: r.size, color: r.color }); py -= 13 }
+    for (const r of wrappedRows) { text(r.s, M + 12, py, { font: r.font, size: r.size, color: r.color }); py -= 13 }
     y -= boxH + 10
   }
 

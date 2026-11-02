@@ -12,11 +12,12 @@ import { addContact, projectFor, removeContact, saveOnboarding, submitOnboarding
 import { acceptProposal, declineProposal, getProposal } from '@/lib/data/proposals'
 import { emailInvoice } from '@/lib/invoice-send'
 import { rateReport } from '@/lib/data/reports'
+import { briefProfile, validateServiceBrief } from '@/lib/service-briefs'
 import { getRequestById, setRequestStatus } from '@/lib/data/requests'
 import { getUserById, setPassword, updateProfile } from '@/lib/data/users'
-import { formText } from '@/lib/validation'
+import { accountLocationSchema, accountPhoneSchema, formText, whatsappSchema } from '@/lib/validation'
 
-export type ActionState = { error?: string; ok?: boolean; message?: string } | null
+export type ActionState = { error?: string; ok?: boolean; message?: string; field?: string } | null
 
 // ---------- Proposals (stage 3) ----------
 
@@ -120,6 +121,7 @@ export async function clientMessageAction(form: FormData) {
     await postMessage({ projectId }, user.id, body, false)
     await notifyTeam({
       title: `${access.project.code}: message from ${user.full_name}`,
+      replyTo: user.email,
       body,
       href: `/staff/projects/${access.project.code}?tab=messages`,
       staffIds: [access.project.lead_analyst_id],
@@ -129,7 +131,7 @@ export async function clientMessageAction(form: FormData) {
     const r = await getRequestById(requestId)
     if (!r || r.client_id !== user.id) return
     await postMessage({ requestId }, user.id, body, false)
-    await notifyTeam({ title: `${r.reference}: message from ${user.full_name}`, body, href: `/staff/requests/${r.reference}#messages`, staffIds: r.owner_id ? [r.owner_id] : undefined })
+    await notifyTeam({ title: `${r.reference}: message from ${user.full_name}`, replyTo: user.email, body, href: `/staff/requests/${r.reference}#messages`, staffIds: r.owner_id ? [r.owner_id] : undefined })
     revalidatePath(`/portal/requests/${r.reference}`)
   }
 }
@@ -145,10 +147,16 @@ async function ownProject(form: FormData) {
 
 export async function saveOnboardingAction(_: ActionState, form: FormData): Promise<ActionState> {
   const { user, project } = await ownProject(form)
+  // The brief is what the team verifies against, so it is fixed once fieldwork starts.
+  if (!['onboarding', 'planning'].includes(project.stage)) return { error: 'The brief is locked now that fieldwork has started. Message your analyst about any change.' }
+  const profile = briefProfile(project)
+  const final = form.get('intent') === '1'
+  const checked = validateServiceBrief(profile, Object.fromEntries(profile.fields.map(f => [f.key, form.get(`service.${f.key}`)])), final)
+  if (checked.error) return { error: checked.error, field: `service.${checked.field}` }
   const title = formText(form, 'title', 140)
   if (!title || title.length < 3) return { error: 'Please give the project a name.' }
   if (form.get('intent') === '1' && form.get('consent') !== 'on') return {error:'Please confirm consent to process the project information.'}
-  if (form.get('intent') === '1' && !formText(form,'siteDirections') && !formText(form,'locationLabel')) return {error:'Please provide the site location or directions.'}
+  if (final && !formText(form,'locationLabel') && (profile.code === 'feasibility' || (profile.physicalLocation && !formText(form,'siteDirections')))) return {error:`Please provide ${profile.location.toLowerCase()}.`, field:'locationLabel'}
   const rawValue = String(form.get('investmentValue') ?? '').replace(/[^\d]/g, '')
   await saveOnboarding(project.id, user.id, {
     title,
@@ -159,17 +167,17 @@ export async function saveOnboardingAction(_: ActionState, form: FormData): Prom
     claims: formText(form, 'claims'),
     concerns: formText(form, 'concerns', 3000),
     investmentValueKes: rawValue ? Math.min(Number(rawValue), 1e13) : null,
+    serviceBrief: checked.brief,
   })
   revalidatePath(`/portal/projects/${project.code}`)
   if (form.get('intent') === '1') {
     if (form.get('consent') !== 'on') return { error: 'Please confirm consent to process the project information.' }
-    if (!formText(form, 'siteDirections') && !formText(form,'locationLabel')) return { error: 'Please tell us where the site is (directions or location).' }
     const submitted = await submitOnboarding(project.id, user.id)
     if (submitted) {
-      await logEvent({ actorId: user.id, projectId: project.id, type: 'onboarding.submitted', summary: 'Site details sent. Planning the visit', clientVisible: true })
+      await logEvent({ actorId: user.id, projectId: project.id, type: 'onboarding.submitted', summary: `${profile.tab} sent. Your analyst will review the brief.`, clientVisible: true })
       await notifyTeam({
         title: `${project.code}: onboarding completed`,
-        body: `${user.full_name} completed onboarding for "${title}". Plan the inspection and assign the field agent.`,
+        body: `${user.full_name} sent ${profile.tab.toLowerCase()} for "${title}". Review the service brief, contact restrictions and agreed scope before planning the work.`,
         href: `/staff/projects/${project.code}`,
         staffIds: [project.lead_analyst_id],
       })
@@ -228,13 +236,19 @@ export async function updateProfileAction(_: ActionState, form: FormData): Promi
   const user = await requireClient()
   const fullName = formText(form, 'fullName', 120)
   if (!fullName || fullName.length < 2) return { error: 'Please enter your full name.' }
+  const phone = accountPhoneSchema.safeParse(form.get('phone'))
+  const whatsapp = whatsappSchema.safeParse(form.get('whatsapp') ?? undefined)
+  if (!phone.success) return { error: phone.error.issues[0]?.message }
+  if (!whatsapp.success) return { error: whatsapp.error.issues[0]?.message }
+  const location = accountLocationSchema.safeParse({ countryCode: form.get('countryCode'), regionCode: form.get('regionCode') })
+  if (!location.success) return { error: location.error.issues[0]?.message }
   const tz = formText(form, 'timezone', 60) ?? 'Africa/Nairobi'
   try {
     new Intl.DateTimeFormat('en', { timeZone: tz })
   } catch {
     return { error: 'Unknown time zone.' }
   }
-  await updateProfile(user.id, { fullName, phone: formText(form, 'phone', 40), basedIn: formText(form, 'basedIn', 80), timezone: tz })
+  await updateProfile(user.id, { fullName, phone: phone.data, whatsapp: whatsapp.data, ...location.data, timezone: tz })
   revalidatePath('/portal', 'layout')
   return { ok: true, message: 'Saved.' }
 }

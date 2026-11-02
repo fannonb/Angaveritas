@@ -5,6 +5,7 @@ import PrintButton from '@/components/app/PrintButton'
 import { requireClient } from '@/lib/auth/session'
 import { invoiceDocument } from '@/lib/data/invoices'
 import { projectByCodeFor } from '@/lib/data/projects'
+import PaystackInvoiceActions from '@/components/app/PaystackInvoiceActions'
 
 export const metadata = { title: 'Invoice' }
 
@@ -26,6 +27,7 @@ export default async function ClientInvoicePage({ params: paramsPromise }: { par
           {inv.status === 'issued' && inv.balanceKes > 0 && <Link className="btn btn-primary btn-small" href={`/portal/projects/${code}?tab=operations`}>I have paid</Link>}
         </div>
       </div>
+      <PaystackInvoiceActions invoiceId={inv.id} balance={inv.status === 'issued' ? inv.balanceKes : 0} depositDue={inv.depositDueKes} waived={access.project.payment_status === 'waived'} />
       <InvoiceDocument inv={inv} />
     </div>
   )

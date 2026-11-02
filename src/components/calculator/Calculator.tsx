@@ -7,6 +7,7 @@ import type { PricingConfig } from '@/lib/pricing/config'
 import { computeQuote, formatKes, tierFor, type QuoteResult } from '@/lib/pricing/engine'
 import { complexityQuestions, standardDeliverables, type ComplexityAnswers } from '@/lib/pricing/questions'
 import AccountFields, { emptyRegister, type Account } from './AccountFields'
+import { briefProfile } from '@/lib/service-briefs'
 import BriefFields, { emptyBrief, type Brief } from './BriefFields'
 import LocationPicker, { type Place } from './LocationPicker'
 
@@ -102,6 +103,7 @@ export default function Calculator({ config, usdRate, signedInAs, initialService
   }, [parentProject, distance])
 
   const isCustom = service === 'custom'
+  const profile = briefProfile({service_code:service})
   const answered = answers.every((a) => a > 0)
   const services = config.services.filter((s) => s.active)
   const addonList = config.addons.filter((a) => a.active)
@@ -246,7 +248,7 @@ export default function Calculator({ config, usdRate, signedInAs, initialService
             )}
 
             {!isCustom && step === 1 && (
-              <Fieldset legend="Where is the site?" hint={`We travel from ${config.origin.label}. Travel is priced by round-trip road distance.`}>
+              <Fieldset legend={profile.location} hint={`We travel from ${config.origin.label}. Travel is priced by round-trip road distance.`}>
                 {!skipLocation && (
                   <LocationPicker
                     value={place}
@@ -258,7 +260,7 @@ export default function Calculator({ config, usdRate, signedInAs, initialService
                     distance={distance}
                   />
                 )}
-                <label className="label mt-5 max-w-[12rem]">Number of sites<input className="input" type="number" min="1" max="20" value={siteCount} onChange={e => { const n = Math.min(20,Math.max(1,Number(e.target.value)||1)); setSiteCount(n); setAnswers(a => a.map((v,i) => i === 0 ? n === 1 ? 1 : n <= 3 ? 2 : 3 : v)); setExtraSites(s => s.slice(0,n-1)) }} /></label>
+                <label className="label mt-5 max-w-[12rem]">Number of locations<input className="input" type="number" min="1" max="20" value={siteCount} onChange={e => { const n = Math.min(20,Math.max(1,Number(e.target.value)||1)); setSiteCount(n); setAnswers(a => a.map((v,i) => i === 0 ? n === 1 ? 1 : n <= 3 ? 2 : 3 : v)); setExtraSites(s => s.slice(0,n-1)) }} /></label>
                 {extraSites.map((site,index) => <div className="mt-4" key={index}><p className="label">Additional site {index+2}</p><LocationPicker value={site.place} distance={site.distance} optional onChange={p => setExtraSites(s => s.map((item,i) => i === index ? {place:p,distance:null} : item))} onDistance={d => setExtraSites(s => s.map((item,i) => i === index ? {...item,distance:d} : item))} /></div>)}
                 {siteCount > extraSites.length+1 && <button className="est-add" type="button" onClick={() => setExtraSites(s => [...s,{place:null,distance:null}])}><AppIcon name="plus" /> Add another site location</button>}
                 {siteCount > 1 && <p className="hint mt-2">Each located site is estimated as a separate return trip. Shared routes and unknown site fees are confirmed in the proposal.</p>}
@@ -359,7 +361,7 @@ export default function Calculator({ config, usdRate, signedInAs, initialService
                     <li>{result.urgency.name} delivery</li>
                   </ul>
                 </div>
-                <BriefFields value={brief} onChange={setBrief} />
+                <BriefFields value={brief} onChange={setBrief} serviceCode={service ?? undefined} />
                 {signedInAs ? (
                   <p className="est-note">
                     <AppIcon name="user" />

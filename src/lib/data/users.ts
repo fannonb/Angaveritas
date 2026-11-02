@@ -1,6 +1,7 @@
 import 'server-only'
 import { sql } from '@/lib/db'
 import type { Role } from '@/lib/labels'
+import { formatLocation } from '@/lib/location'
 
 export type UserRow = {
   id: string
@@ -8,7 +9,10 @@ export type UserRow = {
   password_hash: string | null
   full_name: string
   phone: string | null
+  whatsapp: string | null
   based_in: string | null
+  country_code: string | null
+  region_code: string | null
   timezone: string
   role: Role
   email_verified_at: Date | null
@@ -28,34 +32,40 @@ export async function getUserById(id: string) {
   return row ?? null
 }
 
-export async function createClientAccount(u: { email: string; passwordHash: string; fullName: string; phone: string; basedIn?: string | null; timezone?: string }) {
+export async function createClientAccount(u: { email: string; passwordHash: string; fullName: string; phone: string; whatsapp?: string | null; countryCode: string; regionCode: string; timezone?: string }) {
   const [row] = await sql<{ id: string }[]>`
-    insert into users (email, password_hash, full_name, phone, based_in, timezone, role, consent_at)
-    values (${u.email.toLowerCase()}, ${u.passwordHash}, ${u.fullName}, ${u.phone}, ${u.basedIn ?? null},
+    insert into users (email, password_hash, full_name, phone, whatsapp, based_in, country_code, region_code, timezone, role, consent_at)
+    values (${u.email.trim().toLowerCase()}, ${u.passwordHash}, ${u.fullName}, ${u.phone}, ${u.whatsapp ?? null}, ${formatLocation(u.countryCode, u.regionCode)}, ${u.countryCode}, ${u.regionCode},
             ${u.timezone ?? 'Africa/Nairobi'}, 'client', now())
+    on conflict (email) do nothing
     returning id`
-  return row.id
+  return row?.id ?? null
 }
 
 export async function createStaffAccount(u: { email: string; fullName: string; role: Role; phone?: string | null }) {
   const [row] = await sql<{ id: string }[]>`
     insert into users (email, full_name, role, phone, email_verified_at)
-    values (${u.email.toLowerCase()}, ${u.fullName}, ${u.role}, ${u.phone ?? null}, null)
+    values (${u.email.trim().toLowerCase()}, ${u.fullName}, ${u.role}, ${u.phone ?? null}, null)
+    on conflict (email) do nothing
     returning id`
-  return row.id
+  return row?.id ?? null
 }
 
 export async function setPassword(userId: string, passwordHash: string) {
-  await sql`update users set password_hash = ${passwordHash} where id = ${userId}`
+  await sql.begin(async tx => {
+    await tx`update users set password_hash = ${passwordHash} where id = ${userId} and disabled_at is null`
+    await tx`update user_tokens set used_at=now() where user_id=${userId} and used_at is null`
+  })
 }
 
 export async function markEmailVerified(userId: string) {
   await sql`update users set email_verified_at = coalesce(email_verified_at, now()) where id = ${userId}`
 }
 
-export async function updateProfile(userId: string, p: { fullName: string; phone: string | null; basedIn: string | null; timezone: string }) {
+export async function updateProfile(userId: string, p: { fullName: string; phone: string | null; whatsapp?: string | null; countryCode: string; regionCode: string; timezone: string }) {
   await sql`
-    update users set full_name = ${p.fullName}, phone = ${p.phone}, based_in = ${p.basedIn}, timezone = ${p.timezone}
+    update users set full_name = ${p.fullName}, phone = ${p.phone}, whatsapp = ${p.whatsapp ?? null}, based_in = ${formatLocation(p.countryCode, p.regionCode)},
+      country_code=${p.countryCode},region_code=${p.regionCode},timezone = ${p.timezone}
     where id = ${userId}`
 }
 
@@ -93,7 +103,10 @@ export async function setDisabled(userId: string, disabled: boolean) {
       if (!other.n) throw new Error('Keep at least one active admin account.')
     }
     await tx`update users set disabled_at=${disabled ? tx`now()` : null} where id=${userId}`
-    if (disabled) await tx`delete from sessions where user_id=${userId}`
+    if (disabled) {
+      await tx`delete from sessions where user_id=${userId}`
+      await tx`update user_tokens set used_at=now() where user_id=${userId} and used_at is null`
+    }
   })
 }
 
@@ -106,7 +119,7 @@ export async function listClients(search?: string) {
       (select count(*)::int from projects p where p.client_id = u.id and p.stage <> 'closed') as active_projects
     from users u
     where u.role = 'client'
-      and ${q ? sql`(u.full_name ilike ${q} or u.email ilike ${q} or u.phone ilike ${q})` : sql`true`}
+      and ${q ? sql`(u.full_name ilike ${q} or u.email ilike ${q} or u.phone ilike ${q} or u.whatsapp ilike ${q})` : sql`true`}
     order by u.created_at desc
     limit 300`
 }

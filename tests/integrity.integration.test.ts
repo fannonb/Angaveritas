@@ -31,6 +31,8 @@ describe.skipIf(!enabled)('database confidentiality and report integrity', () =>
     await control.end()
     state.sql = postgres(process.env.DATABASE_URL!, { max: 1, connection: { search_path: `${schema},public` }, onnotice: () => {}, types:{calendarDate:calendarDateType} })
     for (const file of fs.readdirSync('supabase/migrations').filter(f => f.endsWith('.sql')).sort()) await state.sql.unsafe(fs.readFileSync(path.join('supabase/migrations',file),'utf8'))
+    // Synthetic fixtures have a known location; production has no such defaults.
+    await state.sql.unsafe("alter table users alter column country_code set default 'KE', alter column region_code set default '30'")
     const user = async (role: string) => (await state.sql`insert into users(email,full_name,role) values (${`${role}@test.invalid`}, ${role}, ${role}::user_role) returning id`)[0].id as string
     client = await user('client'); otherClient = (await state.sql`insert into users(email,full_name) values ('other@test.invalid','Other') returning id`)[0].id
     agent = await user('field_agent'); analyst = await user('analyst'); admin = await user('admin')

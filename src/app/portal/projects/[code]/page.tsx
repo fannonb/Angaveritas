@@ -1,3 +1,4 @@
+import { briefProfile, briefStageLabels } from '@/lib/service-briefs'
 import OperationsPanel from '@/components/app/OperationsPanel'
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
@@ -8,7 +9,7 @@ import Messages from '@/components/app/Messages'
 import Uploader from '@/components/app/Uploader'
 import VisitReadiness from '@/components/app/VisitReadiness'
 import { requireClient } from '@/lib/auth/session'
-import { listProjectFiles } from '@/lib/data/files'
+import { listProjectFiles, scanningEnabled } from '@/lib/data/files'
 import { listInspections, listProjectFindings } from '@/lib/data/inspections'
 import { listMessages, markRead } from '@/lib/data/messages'
 import { projectBalanceDue, projectDepositDue, reportLock } from '@/lib/data/operations'
@@ -36,21 +37,24 @@ export default async function ProjectPage({ params: paramsPromise, searchParams:
   const access = await projectByCodeFor(user, params.code)
   if (!access) notFound()
   const p = access.project
+  const profile = briefProfile(p)
+  const journeyLabels = briefStageLabels(profile)
   const wanted = moved[searchParams.tab ?? ''] ?? searchParams.tab ?? ''
   const tab: Tab = (TABS as readonly string[]).includes(wanted) ? (wanted as Tab) : 'overview'
 
-  const [inspections, findings, reports, evidence, documents, contacts, messages, events, deposit, balance, lock] = await Promise.all([
+  const lock = await reportLock(p.id)
+  // Findings and evidence are the substance of the report, so they stay hidden until the balance is paid.
+  const [inspections, findings, reports, evidence, documents, contacts, messages, events, deposit, balance] = await Promise.all([
     listInspections(p.id),
-    listProjectFindings(p.id, true),
+    lock ? [] : listProjectFindings(p.id, true),
     listReports(p.id, true),
-    listProjectFiles(p.id, { clientView: true, category: 'evidence' }),
+    lock ? [] : listProjectFiles(p.id, { clientView: true, category: 'evidence' }),
     listProjectFiles(p.id, { clientView: true, category: 'client_document' }),
     listContacts(p.id),
     listMessages({ projectId: p.id }, false),
     projectEvents(p.id, true, p.request_id),
     projectDepositDue(p.id),
     projectBalanceDue(p.id),
-    reportLock(p.id),
   ])
   if (tab === 'messages') await markRead({ projectId: p.id }, user.id)
   const visibleInspections = inspections.filter((i) => i.status !== 'cancelled')
@@ -84,15 +88,15 @@ export default async function ProjectPage({ params: paramsPromise, searchParams:
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <HealthChip health={p.health} />
-          <StageChip stage={p.stage} client />
+          <StageChip stage={p.stage} client label={journeyLabels[p.stage]} />
         </div>
       </div>
 
-      {searchParams.accepted && <p className="alert alert-ok"><strong>Thank you, the proposal is accepted.</strong> Next, tell us about the site below so we can plan the visit.</p>}
-      {searchParams.onboarded && <p className="alert alert-ok"><strong>Thank you, we have your site details.</strong> Your analyst is now planning the visit.</p>}
+      {searchParams.accepted && <p className="alert alert-ok"><strong>Thank you, the proposal is accepted.</strong> Next, complete your {profile.tab.toLowerCase()} below so we can prepare the work.</p>}
+      {searchParams.onboarded && <p className="alert alert-ok"><strong>Thank you, we have your {profile.tab.toLowerCase()}.</strong> Your analyst will review the brief and confirm the next steps.</p>}
 
       <section className="panel panel-pad space-y-4" aria-label="Progress">
-        <StageTracker stage={p.stage} retainer={p.engagement === 'retainer'} client />
+        <StageTracker stage={p.stage} retainer={p.engagement === 'retainer'} client labels={journeyLabels} />
         {tab === 'overview' && (
           <div className="flex flex-wrap items-center justify-between gap-3 border-0 border-t border-solid border-line pt-4">
             <div>
@@ -110,7 +114,7 @@ export default async function ProjectPage({ params: paramsPromise, searchParams:
         active={tab === 'agreement' || tab === 'monitoring' || tab === 'settings' ? '' : tab}
         tabs={[
           { key: 'overview', label: 'Summary', href: href('overview') },
-          { key: 'onboarding', label: 'Site details', href: href('onboarding') },
+          { key: 'onboarding', label: profile.tab, href: href('onboarding') },
           { key: 'reports', label: 'Findings & reports', href: href('reports'), count: reports.length || undefined },
           { key: 'files', label: 'Files', href: href('files'), count: (evidence.length + documents.length) || undefined },
           { key: 'operations', label: 'Payments', href: href('operations'), count: (deposit && !deposit.payment_notified) || (!deposit && balance) ? 1 : undefined },
@@ -163,7 +167,7 @@ export default async function ProjectPage({ params: paramsPromise, searchParams:
               <dl className="kv mt-3">
                 <dt>Project health</dt>
                 <dd><HealthChip health={p.health} />{p.health_note ? <span className="mt-1 block text-ink-2">{p.health_note}</span> : null}</dd>
-                <dt>Next site visit</dt>
+                <dt>Next {profile.activity.toLowerCase()}</dt>
                 <dd>{p.next_inspection ? `${fmtDate(p.next_inspection, tz)} (${relativeDays(p.next_inspection)})` : 'Not booked yet'}</dd>
                 <dt>Your analyst</dt>
                 <dd>{p.analyst_name ?? 'Being assigned'}</dd>
@@ -191,7 +195,7 @@ export default async function ProjectPage({ params: paramsPromise, searchParams:
                 <Link className="btn btn-secondary w-full" href={`/estimate?project=${p.code}`}>Request a follow-up visit</Link>
               )}
               {p.stage === 'onboarding' && (!p.onboarding_submitted_at || !p.data_consent_at) && (
-                <Link className="btn btn-primary w-full" href={href('onboarding')}>Provide site details</Link>
+                <Link className="btn btn-primary w-full" href={href('onboarding')}>Provide {profile.tab.toLowerCase()}</Link>
               )}
               {deposit && !deposit.payment_notified && (
                 <Link className="btn btn-secondary w-full" href={href('operations')}>Pay deposit ({kes(deposit.due_kes)})</Link>
@@ -210,17 +214,21 @@ export default async function ProjectPage({ params: paramsPromise, searchParams:
         <div className="grid gap-6 lg:grid-cols-[1.4fr_1fr] lg:items-start">
           <section className="panel panel-pad space-y-4">
             <div>
-              <h2 className="text-lg">About the site</h2>
+              <h2 className="text-lg">{profile.title}</h2>
               <p className="hint">
-                {p.onboarding_submitted_at
-                  ? `Sent ${fmtDate(p.onboarding_submitted_at, tz)}. You can still update these details.`
-                  : 'Tell us what we need to plan the visit. Save as you go, then press “Send site details” when you are done.'}
+                {!['onboarding', 'planning'].includes(p.stage)
+                  ? 'Fieldwork has started, so the brief is fixed. Message your analyst about any change.'
+                  : p.onboarding_submitted_at
+                  ? `Sent ${fmtDate(p.onboarding_submitted_at, tz)}. You can still update these details until fieldwork starts.`
+                  : 'Save as you go, review your answers and send your brief when ready.'}
               </p>
             </div>
             <OnboardingForm
               submitted={!!p.onboarding_submitted_at && !!p.data_consent_at}
               v={{
                 projectId: p.id,
+                context: { service_code:p.service_code, service_name:p.service_name, engagement:p.engagement },
+                serviceBrief:p.service_brief,
                 title: p.title,
                 locationLabel: p.location_label,
                 county: p.county,
@@ -235,8 +243,8 @@ export default async function ProjectPage({ params: paramsPromise, searchParams:
           <div className="space-y-6">
             <section className="panel panel-pad space-y-4">
               <div>
-                <h2 className="text-lg">People at the site</h2>
-                <p className="hint">Sellers, contractors, caretakers or suppliers we may need to meet.</p>
+                <h2 className="text-lg">{profile.people}</h2>
+                <p className="hint">{profile.peopleHint}</p>
               </div>
               {contacts.length > 0 && (
                 <ul className="divide-y divide-line">
@@ -275,7 +283,7 @@ export default async function ProjectPage({ params: paramsPromise, searchParams:
             </section>
             <section className="panel panel-pad space-y-3">
               <h2 className="text-lg">Documents</h2>
-              <p className="hint">Title deeds, sale agreements, contracts, plans, quotes, licences: anything we should check.</p>
+              <p className="hint">Helpful documents: share what you have. These do not block sending your brief.</p><ul className="list-disc pl-5 text-sm text-ink-2 space-y-2">{profile.documents.map(item => <li key={item}>{item}</li>)}</ul>
               <Link className="btn btn-secondary btn-small" href={href('files')}>Add or view documents in Files</Link>
               <DocumentList files={documents} tz={tz} clientView />
             </section>
@@ -285,7 +293,7 @@ export default async function ProjectPage({ params: paramsPromise, searchParams:
 
       {(tab === 'inspections' || tab === 'reports') && (
         <div className="space-y-6">
-          {visibleInspections.length === 0 && <p className="panel empty">No visit booked yet. Your analyst books it once your site details and deposit are in.</p>}
+          {visibleInspections.length === 0 && <p className="panel empty">No fieldwork booked yet. Your analyst reviews your service brief and payment before confirming the plan.</p>}
           {visibleInspections.map((i) => {
             const rows = findings.filter((f) => f.inspection_code === i.code)
             return (
@@ -300,12 +308,14 @@ export default async function ProjectPage({ params: paramsPromise, searchParams:
                     <InspectionChip status={i.status} />
                   </div>
                 </div>
-                {i.status === 'reviewed' ? (
+                {i.status === 'reviewed' && lock ? (
+                  <p className="panel-pad text-ink-2">This visit has been checked. Its findings open once the remaining balance of {kes(lock.owedKes)} is paid. <Link href={href('operations')}>How to pay</Link></p>
+                ) : i.status === 'reviewed' ? (
                   rows.length ? <FindingsTable findings={rows} /> : <p className="empty">The findings are in the report.</p>
                 ) : (
                   <p className="panel-pad text-ink-2">
                     {i.status === 'scheduled' && `Booked${i.scheduled_for ? ` for ${fmtDate(i.scheduled_for, tz)}` : ''}. Our field agent will collect photos, video and GPS evidence.`}
-                    {i.status === 'in_progress' && 'Our field agent is at the site or sending in the evidence.'}
+                    {i.status === 'in_progress' && 'Our field agent is carrying out the agreed checks or sending in the evidence.'}
                     {i.status === 'submitted' && 'The visit is done. A second person is checking the evidence before it reaches you.'}
                   </p>
                 )}
@@ -314,8 +324,10 @@ export default async function ProjectPage({ params: paramsPromise, searchParams:
           })}
           <section className="panel panel-pad space-y-3">
             <h2 className="text-lg">Photos and video</h2>
-            <p className="text-ink-2">Each item shows its evidence ID, when it was taken and where. Photos appear here once a visit has been checked.</p>
-            <EvidenceGallery files={evidence} tz={tz} />
+            <p className="text-ink-2">Each item shows its evidence ID, when it was taken and where. Photos appear here once a visit has been checked and the balance is paid.</p>
+            {lock && visibleInspections.some((i) => i.status === 'reviewed')
+              ? <p className="text-ink-2">Photos open once the remaining balance of {kes(lock.owedKes)} is paid.</p>
+              : <EvidenceGallery files={evidence} tz={tz} />}
           </section>
         </div>
       )}
@@ -347,7 +359,7 @@ export default async function ProjectPage({ params: paramsPromise, searchParams:
       )}
 
       {tab === 'files' && <div className="space-y-6">
-        <section className="panel panel-pad space-y-3"><h2 className="text-lg">Your documents</h2><p className="hint">Add plans, agreements or other documents the team should check.</p><Uploader projectId={p.id} category="client_document" label="Upload documents" accept="application/pdf,image/*,.doc,.docx,.xls,.xlsx,.csv,.txt" /><DocumentList files={documents} tz={tz} clientView /></section>
+        <section className="panel panel-pad space-y-3"><h2 className="text-lg">Your documents</h2><p className="hint">Add plans, agreements or other documents the team should check.</p><Uploader projectId={p.id} category="client_document" label="Upload documents" accept={`application/pdf,image/*,.docx,.xlsx,.csv,.txt${scanningEnabled() ? ',.doc,.xls' : ''}`} /><DocumentList files={documents} tz={tz} clientView /></section>
         <section className="panel panel-pad space-y-3"><h2 className="text-lg">Reviewed photos and video</h2><EvidenceGallery files={evidence} tz={tz} /></section>
       </div>}
       {tab === 'operations' && !deposit && balance && <p className="alert alert-warn">Balance to pay: <strong>{kes(balance.total)}</strong> on {balance.codes}. Pay it the same way as the deposit, then send us the transaction reference below.</p>}

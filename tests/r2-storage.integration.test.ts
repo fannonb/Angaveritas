@@ -18,8 +18,11 @@ describe.skipIf(!enabled)('Cloudflare R2 storage driver (live bucket)', () => {
     const key = makeStorageKey('r2-test', 'hello.txt')
     try {
       // Browser upload: a short-lived signed PUT straight to the bucket.
-      const target = await uploadTarget('r2-test-file', key)
+      const target = await uploadTarget('r2-test-file', key, body.length)
       expect(target.url).toContain('.r2.cloudflarestorage.com')
+      // The approved size is signed into the link: a larger body is refused.
+      const oversized = await fetch(target.url, { method: 'PUT', body: Buffer.concat([body, body]), headers: { 'Content-Type': 'text/plain' } })
+      expect(oversized.ok).toBe(false)
       const put = await fetch(target.url, { method: 'PUT', body, headers: { 'Content-Type': 'text/plain' } })
       expect(put.status).toBe(200)
 

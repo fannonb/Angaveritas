@@ -18,7 +18,7 @@ export default function Privacy() {
 
       <h2>What we collect</h2>
       <ul>
-        <li><strong>Account details</strong> when you register: name, email address, phone or WhatsApp number, where you are based and your time zone. Your password is stored only as a one-way cryptographic hash.</li>
+        <li><strong>Account details</strong> when you register: name, email address, phone number, optional WhatsApp number, country, state/county/region of residence and your time zone. Your password is stored only as a one-way cryptographic hash.</li>
         <li><strong>Request and project details</strong> you give us: what you need checked, the site location, what you have been told, your concerns, contacts at the site, and documents you upload.</li>
         <li><strong>Engagement records</strong> we create while working for you: proposals and your acceptance of them, inspection findings, photographs, video, GPS and time data, reports and messages.</li>
         <li><strong>Enquiry details</strong> you submit through the contact form.</li>

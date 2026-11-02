@@ -40,14 +40,19 @@ export async function POST(req: Request) {
   let user = await getUser()
   if (!user) {
     if (!data.account) return json({ error: 'Please create an account or sign in to submit.', field: 'account' }, 401)
-    const result =
+    let result
+    try { result =
       data.account.mode === 'register'
-        ? await registerClient({ ...data.account, basedIn: data.account.basedIn })
+        ? await registerClient(data.account)
         : await signInWithPassword(data.account.email, data.account.password)
+    } catch (error) {
+      console.error('[account] request authentication failed', { code: (error as { code?: string }).code })
+      return json({ error: 'We could not complete sign-in right now. Please try again shortly.', field: 'account' }, 503)
+    }
     if (!result.ok) return json({ error: result.error, field: `account.${result.field ?? ''}` }, 422)
     // The new session cookie isn't visible to this request yet, so load the user directly.
     const [u] = await sql<SessionUser[]>`
-      select id, email, full_name, role, phone, based_in, timezone, email_verified_at from users where id = ${result.user.id}`
+      select id, email, full_name, role, phone, whatsapp, based_in, country_code, region_code, timezone, email_verified_at from users where id = ${result.user.id}`
     user = u ?? null
   }
   if (!user) return json({ error: 'Please sign in again.' }, 401)
@@ -126,9 +131,11 @@ export async function POST(req: Request) {
       .filter(Boolean)
       .join('\n'),
     href: `/staff/requests/${saved.reference}`,
+    replyTo: user.email,
   })
   await sendEmail({
     to: user.email,
+    copyTeam: true,
     subject: `We've received your request ${saved.reference}`,
     text: [
       `Hello ${user.full_name.split(' ')[0]},`,

@@ -5,6 +5,7 @@ import { monitoringStatusLabels, ndaStatusLabels, serviceRequestLabels, serviceR
 import { site } from '@/lib/site'
 import Uploader from './Uploader'
 import PaymentNoticeForm from './PaymentNoticeForm'
+import PaystackInvoiceActions from './PaystackInvoiceActions'
 import { kes, fmtDate, fmtDateTime } from './format'
 
 // Billing and service for one project. Staff see every control; clients see their invoices, how to pay,
@@ -29,7 +30,7 @@ export default async function OperationsPanel({ projectId, manager, section = 'a
   return <div className="space-y-6">
     {show('billing') && <section className="panel panel-pad space-y-4">
       <h2 className="text-lg">{manager ? 'Billing and receipts' : 'Invoices and payments'}</h2>
-      {manager && <p className="hint">Record each payment against its invoice. Online M-Pesa and card checkout will become available after a payment provider is connected.</p>}
+      {manager && <p className="hint">Paystack payments are confirmed automatically. Record payments received outside checkout manually. Manage Paystack refunds in the Paystack dashboard; confirmed refunds sync automatically.</p>}
       {!data.invoices.length && <p className="empty">{manager ? 'No invoice has been issued yet.' : 'No invoice yet. It appears here when you accept a proposal.'}</p>}
       {data.invoices.map((i) => {
         const balance = Math.max(0, i.amount_kes - i.paid_kes)
@@ -50,6 +51,7 @@ export default async function OperationsPanel({ projectId, manager, section = 'a
             {i.status === 'issued' && balance > 0 && <><dt>Still to pay</dt><dd>{kes(balance)}{beforeVisit >= balance ? ', due before the site visit' : beforeVisit > 0 ? `, of which ${kes(beforeVisit)} before the site visit` : ''}</dd></>}
             {i.status === 'issued' && balance > 0 && i.due_on && <><dt>Due</dt><dd>{fmtDate(i.due_on)}{manager && i.reminder_sent_at ? ` · reminder sent ${fmtDate(i.reminder_sent_at)}` : ''}</dd></>}
           </dl>
+          <PaystackInvoiceActions invoiceId={i.id} balance={i.status === 'issued' ? balance : 0} depositDue={beforeVisit} manager={manager} waived={p.payment_status === 'waived'} />
           {data.payments.filter((payment) => payment.invoice_id === i.id).map((payment) => <p key={payment.id} className="text-sm text-ink-2">{payment.kind === 'refund' ? 'Refund' : 'Payment received'}: {kes(payment.amount_kes)} · ref {payment.reference} · {fmtDateTime(payment.created_at)}</p>)}
           <div className="flex flex-wrap items-center gap-x-4 gap-y-2 pt-1 text-sm">
             <a className="font-semibold" href={invoiceHref(i)}>{manager ? 'Preview invoice' : 'View invoice'}</a>
@@ -431,7 +433,7 @@ function HowToPay({ invoices }: { invoices: string[] }) {
         </div>
       )}
       <p className="text-xs text-muted">
-        <strong>Security note:</strong> We confirm all payments on this dashboard within one business day. AngaVeritas personnel will never ask you to transfer funds to a personal mobile number or personal bank account.
+        Payments through portal checkout are confirmed automatically. Payments made outside checkout are confirmed by the team. AngaVeritas personnel will never ask you to transfer funds to a personal mobile number or personal bank account.
       </p>
     </div>
   )

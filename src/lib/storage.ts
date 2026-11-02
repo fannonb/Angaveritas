@@ -65,12 +65,13 @@ export function makeStorageKey(scope: string, filename: string) {
 }
 
 /** Where the browser should PUT the file bytes. */
-export async function uploadTarget(fileId: string, key: string): Promise<{ url: string; headers: Record<string, string> }> {
+export async function uploadTarget(fileId: string, key: string, size: number): Promise<{ url: string; headers: Record<string, string> }> {
   if (driver() === 'local') return { url: `/api/files/${fileId}/upload`, headers: {} }
   if (driver() === 'r2') {
     const { client, bucket } = r2()
-    // A short-lived signed PUT: the browser sends the bytes straight to R2.
-    const url = await getSignedUrl(client, new PutObjectCommand({ Bucket: bucket, Key: key }), { expiresIn: 900 })
+    // A short-lived signed PUT: the browser sends the bytes straight to R2. The declared size is part of
+    // the signature, so the link cannot be used to store a larger file than the one we approved.
+    const url = await getSignedUrl(client, new PutObjectCommand({ Bucket: bucket, Key: key, ContentLength: size }), { expiresIn: 900, signableHeaders: new Set(['content-length']) })
     return { url, headers: {} }
   }
   const s = supa()
