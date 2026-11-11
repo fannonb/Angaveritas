@@ -67,8 +67,8 @@ export async function projectOperations(projectId: string) {
 
 /** The first unpaid deposit on a project, or null when the visit is not waiting on payment. */
 export async function projectDepositDue(projectId: string) {
-  const [row] = await sql<{ code: string; due_kes: number; payment_notified: boolean }[]>`
-    select code, due_kes,(coalesce((select sum(amount_kes) from payment_notices where invoice_id=x.invoice_id and status='pending'),0)>=due_kes or exists(select 1 from paystack_attempts a where a.invoice_id=x.invoice_id and ((a.status in ('initializing','pending') and a.created_at > now() - interval '30 minutes') or (a.status='review' and a.reviewed_at is null)))) as payment_notified from (
+  const [row] = await sql<{ invoice_id: string; code: string; due_kes: number; payment_notified: boolean }[]>`
+    select invoice_id, code, due_kes,(coalesce((select sum(amount_kes) from payment_notices where invoice_id=x.invoice_id and status='pending'),0)>=due_kes or exists(select 1 from paystack_attempts a where a.invoice_id=x.invoice_id and ((a.status in ('initializing','pending') and a.created_at > now() - interval '30 minutes') or (a.status='review' and a.reviewed_at is null)))) as payment_notified from (
       select i.id invoice_id,i.code, i.created_at,
         i.deposit_kes - coalesce((select sum(case when kind = 'payment' then amount_kes else -amount_kes end)::int from payments where invoice_id = i.id), 0) as due_kes
       from invoices i join projects p on p.id = i.project_id

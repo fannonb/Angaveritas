@@ -42,7 +42,7 @@ export default async function OperationsPanel({ projectId, manager, finance = fa
       {manager && issued.length>0&&<div className="grid gap-3 sm:grid-cols-3" aria-label="Project payment summary"><div className="rounded border border-line p-3"><p className="text-sm text-muted">Deposit still due</p><p className="text-xl font-semibold">{kes(depositDue)}</p><p className="hint">Before work starts</p></div><div className="rounded border border-line p-3"><p className="text-sm text-muted">Remaining after deposit</p><p className="text-xl font-semibold">{kes(balanceDue-depositDue)}</p><p className="hint">Before your final report opens</p></div><div className="rounded border border-line p-3"><p className="text-sm text-muted">Payments received</p><p className="text-xl font-semibold">{kes(issued.reduce((sum,i)=>sum+i.paid_kes,0))}</p><p className="hint">After recorded refunds</p></div></div>}
       {p.payment_status==='waived'&&<p className="alert alert-info">Payment is waived. No payment is required.</p>}
       {!data.invoices.length && <p className="empty">{manager ? 'No invoice has been issued yet.' : 'No invoice yet. It appears here when you accept a proposal.'}</p>}
-      {data.invoices.map((i) => {
+      {manager && data.invoices.map((i) => {
         const balance = Math.max(0, i.amount_kes - i.paid_kes)
         const beforeVisit = Math.max(0, i.deposit_kes - i.paid_kes)
         const overdue = i.status === 'issued' && balance > 0 && !!i.due_on && String(i.due_on).slice(0, 10) < today
@@ -74,8 +74,9 @@ export default async function OperationsPanel({ projectId, manager, finance = fa
           )}
           <PaystackInvoiceActions invoiceId={i.id} balance={i.status === 'issued' ? balance : 0} depositDue={beforeVisit} manager={manager} waived={p.payment_status === 'waived'} />
           {data.payments.filter((payment) => payment.invoice_id === i.id).map((payment) => <p key={payment.id} className="text-sm text-ink-2">{payment.kind === 'refund' ? 'Refund' : 'Paid'} {kes(payment.amount_kes)} · {fmtDate(payment.created_at)}{manager ? ` · ref ${payment.reference}` : ''}</p>)}
+          {finance && i.status === 'issued' && balance > 0 && <p className="hint">Need a different amount, a discount or a new due date before the client pays? Edit the invoice. The client sees the revised invoice and your reason.</p>}
           <div className="flex flex-wrap items-center gap-x-4 gap-y-2 pt-1 text-sm">
-            {finance && i.status==='issued'&&<a href={`${invoiceHref(i)}?edit=1#edit-invoice`} className="btn btn-secondary btn-small no-underline">Edit invoice</a>}
+            {finance && i.status==='issued'&&<a href={`${invoiceHref(i)}?edit=1#edit-invoice`} className={`btn ${balance > 0 ? 'btn-primary' : 'btn-secondary'} btn-small no-underline`}>Edit invoice</a>}
             <a className="font-semibold" href={invoiceHref(i)}>{manager ? 'Preview invoice' : 'View invoice'}</a>
             <a href={`/api/invoices/${i.id}/pdf?download`}>Download PDF</a>
             {manager && i.status === 'issued' && <span className="text-muted">{i.sent_at ? `Emailed ${fmtDateTime(i.sent_at)}` : 'Not emailed yet'}</span>}
@@ -96,7 +97,81 @@ export default async function OperationsPanel({ projectId, manager, finance = fa
           </div>
         </article>
       })}
-      {data.notices.length > 0 && <div className="space-y-3">
+      {/* Clients: what is still to pay first, then every invoice, payment and reference in tables. */}
+      {!manager && data.invoices.length > 0 && (() => {
+        const rows = data.invoices.map((i) => ({ i, balance: Math.max(0, i.amount_kes - i.paid_kes), beforeVisit: Math.max(0, i.deposit_kes - i.paid_kes) }))
+        const toPay = rows.filter((r) => r.i.status === 'issued' && r.balance > 0 && p.payment_status !== 'waived')
+        const overpaid = rows.filter((r) => r.i.status === 'issued' && r.i.paid_kes > r.i.amount_kes)
+        const status = (r: (typeof rows)[number]): [string, string] =>
+          r.i.status === 'cancelled' ? ['Cancelled', 'chip--none']
+            : r.balance === 0 ? ['Paid', 'chip--ok']
+            : r.i.due_on && String(r.i.due_on).slice(0, 10) < today ? ['Overdue', 'chip--bad']
+            : r.beforeVisit === 0 ? ['Deposit paid', 'chip--warn'] : ['To pay', 'chip--warn']
+        const methods: Record<string, string> = { paystack: 'Card or M-Pesa (Paystack)', manual: 'Bank or M-Pesa' }
+        return <>
+          {toPay.map(({ i, balance, beforeVisit }) => (
+            <article key={i.id} className="rounded border border-line p-4 space-y-3">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <p><strong>{kes(balance)} to pay</strong> on <span className="font-mono">{i.code}</span>{i.due_on ? ` by ${fmtDate(i.due_on)}` : ''}</p>
+                <a className="text-sm" href={invoiceHref(i)}>View invoice</a>
+              </div>
+              {beforeVisit > 0 && beforeVisit < balance && <p className="hint">{kes(beforeVisit)} of this is the deposit, due before the site visit.</p>}
+              <PaystackInvoiceActions invoiceId={i.id} balance={balance} depositDue={beforeVisit} manager={false} waived={false} />
+            </article>
+          ))}
+          {overpaid.map((r) => <p key={r.i.id} className="alert alert-info">{r.i.code} is overpaid by {kes(r.i.paid_kes - r.i.amount_kes)}. Your analyst will arrange a refund. No further payment is needed.</p>)}
+          <div className="overflow-x-auto rounded border border-line">
+            <table className="table w-full text-sm">
+              <thead><tr><th>Invoice</th><th>Description</th><th className="!text-right">Total</th><th className="!text-right">Paid</th><th className="!text-right">Balance</th><th>Due</th><th>Status</th><th><span className="sr-only">Documents</span></th></tr></thead>
+              <tbody>
+                {rows.map((r) => {
+                  const [label, tone] = status(r)
+                  return <tr key={r.i.id}>
+                    <td className="whitespace-nowrap font-mono">{r.i.code}</td>
+                    <td>{plainLabel(r.i)}{r.i.revision > 1 && <span className="block text-xs text-muted">Revised: {r.i.revision_reason}</span>}{r.i.status === 'cancelled' && r.i.cancel_reason && <span className="block text-xs text-muted">{r.i.cancel_reason}</span>}</td>
+                    <td className="whitespace-nowrap !text-right">{kes(r.i.amount_kes)}</td>
+                    <td className="whitespace-nowrap !text-right">{kes(r.i.paid_kes)}</td>
+                    <td className="whitespace-nowrap !text-right">{r.i.status === 'issued' ? kes(r.balance) : '—'}</td>
+                    <td className="whitespace-nowrap">{r.i.status === 'issued' && r.balance > 0 && r.i.due_on ? fmtDate(r.i.due_on) : '—'}</td>
+                    <td><span className={`chip ${tone}`}>{label}</span></td>
+                    <td className="whitespace-nowrap !text-right"><a href={invoiceHref(r.i)}>View</a> · <a href={`/api/invoices/${r.i.id}/pdf?download`}>PDF</a></td>
+                  </tr>
+                })}
+              </tbody>
+            </table>
+          </div>
+          {data.payments.length > 0 && <div className="space-y-2">
+            <h3 className="text-base">Payments received</h3>
+            <div className="overflow-x-auto rounded border border-line">
+              <table className="table w-full text-sm">
+                <thead><tr><th>Date</th><th>Invoice</th><th>Method</th><th className="!text-right">Amount</th></tr></thead>
+                <tbody>{data.payments.map((pay) => <tr key={pay.id}>
+                  <td className="whitespace-nowrap">{fmtDate(pay.created_at)}</td>
+                  <td className="font-mono">{pay.invoice_code}</td>
+                  <td>{pay.kind === 'refund' ? 'Refund to you' : methods[pay.provider] ?? 'Payment'}</td>
+                  <td className="whitespace-nowrap !text-right">{pay.kind === 'refund' ? '−' : ''}{kes(pay.amount_kes)}</td>
+                </tr>)}</tbody>
+              </table>
+            </div>
+          </div>}
+          {data.notices.length > 0 && <div className="space-y-2">
+            <h3 className="text-base">Payment references you sent</h3>
+            <div className="overflow-x-auto rounded border border-line">
+              <table className="table w-full text-sm">
+                <thead><tr><th>Sent</th><th>Invoice</th><th>Reference</th><th className="!text-right">Amount</th><th>Status</th></tr></thead>
+                <tbody>{data.notices.map((n) => <tr key={n.id}>
+                  <td className="whitespace-nowrap">{fmtDate(n.created_at)}</td>
+                  <td className="font-mono">{n.invoice_code}</td>
+                  <td>{n.reference}{n.note ? <span className="block text-xs text-muted">{n.note}</span> : null}</td>
+                  <td className="whitespace-nowrap !text-right">{kes(n.amount_kes)}</td>
+                  <td>{n.status === 'pending' ? 'Being checked' : n.status === 'confirmed' ? 'Confirmed' : `Needs attention${n.response ? `: ${n.response}` : ''}`}</td>
+                </tr>)}</tbody>
+              </table>
+            </div>
+          </div>}
+        </>
+      })()}
+      {manager && data.notices.length > 0 && <div className="space-y-3">
         <h3 className="text-base">Payment notifications</h3>
         {data.notices.map(n => <article key={n.id} className="rounded border border-line p-3 space-y-2 text-sm">
           <p><strong>{n.invoice_code} · {kes(n.amount_kes)}</strong> · ref {n.reference}</p>

@@ -300,6 +300,59 @@ export default async function ProjectPage({ params: paramsPromise, searchParams:
 
       {(tab === 'inspections' || tab === 'reports') && (
         <div className="space-y-6">
+          <nav aria-label="On this page" className="flex flex-wrap gap-2">
+            <a className="btn btn-secondary btn-small no-underline" href="#reports">Reports{reports.length ? ` (${reports.length})` : ''}</a>
+            <a className="btn btn-secondary btn-small no-underline" href="#visits">Site visits and findings{visibleInspections.length ? ` (${visibleInspections.length})` : ''}</a>
+            <a className="btn btn-secondary btn-small no-underline" href="#photos">Photos and video{evidence.length ? ` (${evidence.length})` : ''}</a>
+          </nav>
+          {/* Reports first: what the client came for, with the read and download actions on each one. */}
+          <section id="reports" className="panel scroll-mt-24">
+            <div className="panel-head"><h2>Reports</h2>{reports.length > 0 && <span className="text-sm text-muted">{reports.length} published</span>}</div>
+            {reports.length === 0 ? (
+              <p className="empty">Your report appears here as soon as it has passed review. You can follow the site visit below.</p>
+            ) : (
+              <ul className="divide-y divide-line">
+                {reports.map((r) => {
+                  const read = `/portal/projects/${p.code}/reports/${r.id}`
+                  const findingCount = findings.filter((f) => !!r.inspection_code && f.inspection_code === r.inspection_code).length
+                  return (
+                    <li key={r.id} className="grid gap-4 px-6 py-5 md:grid-cols-[minmax(0,1fr)_auto] md:items-start">
+                      <div className="min-w-0 space-y-2">
+                        <p className="kicker">Published {fmtDate(r.published_at, tz)}{r.inspection_code ? ` · ${r.inspection_code}` : ''}</p>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Link href={read} className="text-lg font-semibold text-ink no-underline hover:underline">{r.title}</Link>
+                          {r.client_unlocked && !r.client_viewed_at && <span className="chip chip--info chip--plain">New</span>}
+                          {r.client_unlocked && r.overall_status && <span className={`chip chip--${r.overall_status}`}>{overallStatusLabels[r.overall_status]}</span>}
+                          {!r.client_unlocked && <span className="chip chip--warn chip--plain">Opens after payment</span>}
+                        </div>
+                        {r.client_unlocked ? (
+                          <>
+                            {r.recommended_decision && <p className="text-sm"><span className="text-muted">Recommendation:</span> <strong>{r.recommended_decision}</strong></p>}
+                            {r.executive_summary && <p className="line-clamp-3 text-sm text-ink-2">{r.executive_summary}</p>}
+                            {findingCount > 0 && <p className="text-xs text-muted">{findingCount} finding{findingCount === 1 ? '' : 's'} · <a href="#visits">see them by site visit</a></p>}
+                          </>
+                        ) : (
+                          <p className="text-sm text-ink-2">{lock ? `Pay the remaining balance of ${kes(lock.owedKes)} to open the findings, recommendation and PDF.` : 'Pay the remaining balance to open the findings, recommendation and PDF.'}</p>
+                        )}
+                      </div>
+                      <div className="flex flex-wrap gap-2 md:flex-col md:items-stretch">
+                        {r.client_unlocked ? (
+                          <>
+                            <Link className="btn btn-primary btn-small" href={read}>{r.client_viewed_at ? 'Read again' : 'Read report'}</Link>
+                            <a className="btn btn-secondary btn-small" href={`/api/reports/${r.id}/pdf`}>Download PDF</a>
+                            {r.pdf_file_id && <a className="btn btn-secondary btn-small" href={`/api/files/${r.pdf_file_id}?download`}>Attached PDF</a>}
+                          </>
+                        ) : (
+                          <Link className="btn btn-primary btn-small" href={href('operations')}>How to pay</Link>
+                        )}
+                      </div>
+                    </li>
+                  )
+                })}
+              </ul>
+            )}
+          </section>
+          <h2 id="visits" className="scroll-mt-24 text-lg">Site visits and findings</h2>
           {visibleInspections.length === 0 && <p className="panel empty">No fieldwork booked yet. Your analyst reviews your service brief and payment before confirming the plan.</p>}
           {visibleInspections.map((i) => {
             const rows = findings.filter((f) => f.inspection_code === i.code)
@@ -329,38 +382,12 @@ export default async function ProjectPage({ params: paramsPromise, searchParams:
               </section>
             )
           })}
-          <section className="panel panel-pad space-y-3">
+          <section id="photos" className="panel panel-pad space-y-3 scroll-mt-24">
             <h2 className="text-lg">Photos and video</h2>
             <p className="text-ink-2">Each item shows its evidence ID, when it was taken and where. Photos appear here once a visit has been checked and the balance is paid.</p>
             <EvidenceGallery files={evidence} tz={tz} />
           </section>
         </div>
-      )}
-
-      {tab === 'reports' && (
-        <section className="panel">
-          {lock && reports.length > 0 && <p className="alert alert-warn m-4">Reports for the current engagement open once its remaining balance for this engagement is paid. <Link href={href('operations')}>How to pay</Link></p>}
-          {reports.length === 0 ? (
-            <p className="empty">Your report will appear here as soon as it has passed review.</p>
-          ) : (
-            <ul className="divide-y divide-line">
-              {reports.map((r) => (
-                <li key={r.id}>
-                  <Link href={`/portal/projects/${p.code}/reports/${r.id}`} className="flex flex-wrap items-center justify-between gap-3 px-6 py-4 text-ink no-underline hover:bg-paper">
-                    <span>
-                      <strong className="block">{r.title}</strong>
-                      <span className="text-sm text-ink-2">Published {fmtDate(r.published_at, tz)}{r.client_unlocked && r.recommended_decision ? ` · ${r.recommended_decision}` : ''}</span>
-                    </span>
-                    <span className="flex gap-2">
-                      {r.client_unlocked && r.overall_status && <span className={`chip chip--${r.overall_status}`}>{overallStatusLabels[r.overall_status]}</span>}
-                      <ReportChip status={r.status} />
-                    </span>
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
       )}
 
       {tab === 'reports' && reportsRead && (

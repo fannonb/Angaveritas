@@ -7,7 +7,7 @@ type Project = BriefContext & {
   lead_analyst_id: string | null; field_agent_id: string | null; analyst_name: string | null; agent_name: string | null; brief_approved?: boolean | null
 }
 type Owner = 'team' | 'client' | 'admin'
-type Step = { key: string; label: string; done: boolean; owner: Owner; text: string; action?: { label: string; href: string } }
+type Step = { key: string; label: string; done: boolean; owner: Owner; text: string; action?: { label: string; href: string }; extra?: { label: string; href: string } }
 
 const ownerLabel: Record<Owner, string> = { team: 'Your team', client: 'Client', admin: 'Admin' }
 
@@ -17,7 +17,7 @@ const ownerLabel: Record<Owner, string> = { team: 'Your team', client: 'Client',
  */
 export default function VisitReadiness({ project: p, deposit, admin = false }: {
   project: Project
-  deposit: { code: string; due_kes: number; payment_notified: boolean } | null
+  deposit: { invoice_id?: string; code: string; due_kes: number; payment_notified: boolean } | null
   admin?: boolean
 }) {
   const base = `/staff/projects/${p.code}`
@@ -31,7 +31,9 @@ export default function VisitReadiness({ project: p, deposit, admin = false }: {
     ? { key: 'deposit', label: 'Deposit received', done: true, owner: 'client', text: p.payment_status === 'waived' ? 'Payment waived by an admin.' : 'Fieldwork can go ahead.' }
     : deposit?.payment_notified
       ? { key: 'deposit', label: 'Confirm the deposit', done: false, owner: 'admin', text: `The client sent a payment reference for ${deposit.code}. Check it against the bank or M-Pesa records.${admin ? '' : ' An admin confirms it.'}`, action: admin ? { label: 'Confirm payment', href: `${base}?tab=operations` } : undefined }
-      : { key: 'deposit', label: 'Client pays the deposit', done: false, owner: 'client', text: deposit ? `${kes(deposit.due_kes)} due on ${deposit.code}. Card and M-Pesa payments through Paystack confirm automatically.` : 'The deposit invoice is issued when the proposal is accepted.', action: remind }
+      : { key: 'deposit', label: 'Client pays the deposit', done: false, owner: 'client', text: deposit ? `${kes(deposit.due_kes)} due on ${deposit.code}. Card and M-Pesa payments through Paystack confirm automatically.` : 'The deposit invoice is issued when the proposal is accepted.', action: remind,
+        // Before the client pays, an admin can still change the amount, add a discount or move the due date.
+        extra: admin && deposit?.invoice_id ? { label: 'Edit invoice', href: `${base}/invoices/${deposit.invoice_id}?edit=1#edit-invoice` } : undefined }
 
   const steps: Step[] = [
     { key: 'accepted', label: 'Proposal accepted', done: true, owner: 'client', text: `Project opened ${fmtDate(p.created_at)}.` },
@@ -68,6 +70,7 @@ export default function VisitReadiness({ project: p, deposit, admin = false }: {
               <span className="flex flex-wrap items-center gap-2">
                 <span className={`chip chip--plain ${s.owner === 'client' ? 'chip--none' : 'chip--warn'}`}>{s.owner === 'client' ? 'Waiting on client' : ownerLabel[s.owner]}</span>
                 {s.action && <Link className="btn btn-secondary btn-small no-underline" href={s.action.href}>{s.action.label}</Link>}
+                {s.extra && <Link className="btn btn-secondary btn-small no-underline" href={s.extra.href}>{s.extra.label}</Link>}
               </span>
             )}
           </li>
