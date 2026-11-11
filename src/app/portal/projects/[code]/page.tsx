@@ -58,6 +58,10 @@ export default async function ProjectPage({ params: paramsPromise, searchParams:
     projectPaymentPending(p.id),
   ])
   const owedKes = (await unpaidInvoices(p.id)).reduce((s, u) => s + u.unpaid_kes, 0)
+  // Closing the project comes after the client has opened every report they can read.
+  const unlockedReports = reports.filter((r) => r.client_unlocked)
+  const reportsRead = unlockedReports.length > 0 && unlockedReports.every((r) => r.client_viewed_at)
+  const openVisit = inspections.some((i) => ['scheduled', 'in_progress', 'submitted'].includes(i.status))
   if (tab === 'messages') await markRead({ projectId: p.id }, user.id)
   const visibleInspections = inspections.filter((i) => i.status !== 'cancelled')
   const tz = user.timezone
@@ -219,7 +223,6 @@ export default async function ProjectPage({ params: paramsPromise, searchParams:
                 <Link className="btn btn-primary btn-small mt-4" href={`/portal/projects/${p.code}/reports/${reports[0].id}`}>Read the report</Link>
               </section>
             )}
-            <CompleteProjectCard projectId={p.id} stage={p.stage} lock={lock} openVisit={inspections.some((i) => ['scheduled', 'in_progress', 'submitted'].includes(i.status))} />
             <section className="panel panel-pad">
               <h2 className="text-lg">At a glance</h2>
               <dl className="kv mt-3">
@@ -354,6 +357,12 @@ export default async function ProjectPage({ params: paramsPromise, searchParams:
             </ul>
           )}
         </section>
+      )}
+
+      {tab === 'reports' && reportsRead && (
+        <div className="mt-6">
+          <CompleteProjectCard projectId={p.id} stage={p.stage} lock={lock} openVisit={openVisit} />
+        </div>
       )}
 
       {tab === 'files' && <div className="space-y-6">

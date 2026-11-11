@@ -16,7 +16,6 @@ export default function VisitSubmit({ inspectionId, incomplete, release = false 
     } else setError('')
   }}>
     <input type="hidden" name="inspectionId" value={inspectionId} /><input type="hidden" name="to" value={release ? 'released' : 'submitted'} />
-    {release&&<label className="label mb-3">Reason for admin review exception<textarea className="input" name="reviewException" minLength={10} required placeholder="Why a separate reviewer is unavailable and how the evidence was checked"/></label>}
     <Send disabled={incomplete} release={release} />{error && <p className="mt-2 text-sm text-bad" role="alert">{error}</p>}
   </form>
 }

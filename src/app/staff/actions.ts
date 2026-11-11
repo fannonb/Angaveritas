@@ -531,58 +531,58 @@ async function changeInspectionStatus(insp: NonNullable<Awaited<ReturnType<typeo
   refreshProject(p.code)
 }
 
-export async function saveInspectionCheckAction(form: FormData) {
+/**
+ * Saves every required check on a visit in one go. Only checks whose outcome, note or photos changed are written.
+ * A check marked "checked" also records (or updates) its finding, as the single-check form used to.
+ */
+export async function saveInspectionChecksAction(form: FormData) {
   const user = await requireStaff()
-  const { insp, access } = await editableInspection(form, user)
-  const p = access.project
-  const outcome = str(form, 'outcome')
-  const note = formText(form, 'note', 4000) ?? ''
-  let evidenceIds = [...new Set(form.getAll('evidenceIds').map(String))].filter(id => /^[0-9a-f-]{36}$/i.test(id))
-  if (!['pending','checked','could_not_check','another_visit'].includes(outcome)) return
+  const { insp } = await editableInspection(form, user)
+  const back = (error: string) => redirect(`/staff/inspections/${insp.id}?error=${encodeURIComponent(error)}#visit-checks`)
+  const ids = [...new Set(form.getAll('checkId').map(String))].filter(id => /^[0-9a-f-]{36}$/i.test(id))
+  if (!ids.length) return
+  const stored = await sql<{ id: string; label: string; outcome: string; note: string | null; evidence_ids: string[] }[]>`
+    select id, label, outcome, note, evidence_ids from inspection_checks where inspection_id = ${insp.id} and id in ${sql(ids)}`
+  const wanted = stored.map(c => ({
+    ...c,
+    next: {
+      outcome: str(form, `outcome:${c.id}`) || c.outcome,
+      note: formText(form, `note:${c.id}`, 4000) ?? '',
+      evidence: [...new Set(form.getAll(`evidence:${c.id}`).map(String))].filter(id => /^[0-9a-f-]{36}$/i.test(id)),
+    },
+  }))
+  for (const c of wanted) {
+    if (!['pending', 'checked', 'could_not_check', 'another_visit'].includes(c.next.outcome)) back('Choose an outcome for each check.')
+    if (c.next.outcome !== 'pending' && c.next.note.length < 3) back(`Add what you found for “${c.label}”.`)
+  }
   // Only this visit's own evidence can support its checks.
-  if (evidenceIds.length) {
-    const valid = await sql`select id from files where id in ${sql(evidenceIds)} and inspection_id = ${insp.id} and project_id = ${insp.project_id} and status = 'ready' and category = 'evidence'`
-    if (valid.length !== evidenceIds.length) redirect(`/staff/inspections/${insp.id}?error=${encodeURIComponent('Choose evidence uploaded for this visit.')}`)
+  const chosen = [...new Set(wanted.flatMap(c => c.next.evidence))]
+  if (chosen.length) {
+    const valid = await sql`select id from files where id in ${sql(chosen)} and inspection_id = ${insp.id} and status = 'ready' and category = 'evidence'`
+    if (valid.length !== chosen.length) back('Choose evidence uploaded for this visit.')
   }
-
-  // If marked checked and no photos were explicitly selected, link this visit's evidence that passed the integrity check.
-  // Flagged items need a person to look at them before they support anything.
-  if (outcome === 'checked' && evidenceIds.length === 0) {
-    const readyFiles = await sql<{ id: string }[]>`select id from files where inspection_id = ${insp.id} and category = 'evidence' and status = 'ready' and integrity_flag is null`
-    if (readyFiles.length > 0) {
-      evidenceIds = readyFiles.map(f => f.id)
-    }
-  }
-
+  const same = (a: string[], b: string[]) => a.length === b.length && a.every(x => b.includes(x))
+  const changed = wanted.filter(c => c.next.outcome !== c.outcome || c.next.note !== (c.note ?? '') || !same(c.next.evidence, c.evidence_ids))
+  if (!changed.length) return
+  // A check marked checked with no photos chosen is supported by this visit's photos that passed the integrity check.
+  const unflagged = (await sql<{ id: string }[]>`select id from files where inspection_id = ${insp.id} and category = 'evidence' and status = 'ready' and integrity_flag is null`).map(f => f.id)
   try {
     await withActor(user.id, async tx => {
-      // Auto-start visit if it was still scheduled
-      if (insp.status === 'scheduled') {
-        await tx`update inspections set status = 'in_progress', started_at = coalesce(started_at, now()) where id = ${insp.id}`
-        if (['planning', 'onboarding'].includes(p.stage)) {
-          await tx`update projects set stage = 'fieldwork' where id = ${p.id}`
-        }
-      }
-
-      const [check] = await tx`update inspection_checks set outcome=${outcome},note=${note},evidence_ids=${evidenceIds},updated_by=${user.id}
-        where id=${str(form,'checkId')} and inspection_id=${insp.id} returning label`
-
-      // Auto-sync completed check into findings so staff does not need to duplicate entry. The draft finding
-      // claims no more than a tick-box shows: an analyst sets the confidence and evidence grade on review,
-      // and a status or grade someone already set is never overwritten.
-      if (outcome === 'checked' && check?.label && note) {
-        const [existing] = await tx`select id from findings where inspection_id = ${insp.id} and area = ${check.label}`
-        if (existing) {
-          await tx`update findings set observation = ${note}, evidence_ids = ${evidenceIds}, updated_at = now()
-            where id = ${existing.id}`
-        } else {
-          await tx`insert into findings (inspection_id, position, area, observation, status, confidence, evidence_grade, created_by, evidence_ids)
-            values (${insp.id}, (select coalesce(max(position), 0) + 1 from findings where inspection_id = ${insp.id}),
-              ${check.label}, ${note}, 'ok', ${evidenceIds.length ? 'moderate' : 'limited'}, null, ${user.id}, ${evidenceIds})`
-        }
+      for (const c of changed) {
+        const evidenceIds = c.next.outcome === 'checked' && !c.next.evidence.length ? unflagged : c.next.evidence
+        await tx`update inspection_checks set outcome=${c.next.outcome}, note=${c.next.note || null}, evidence_ids=${evidenceIds}, updated_by=${user.id}
+          where id=${c.id} and inspection_id=${insp.id}`
+        // The draft finding claims no more than the check shows: an analyst sets confidence and evidence grade on review,
+        // and a status or grade someone already set is never overwritten.
+        if (c.next.outcome !== 'checked') continue
+        const [existing] = await tx`select id from findings where inspection_id = ${insp.id} and area = ${c.label}`
+        if (existing) await tx`update findings set observation = ${c.next.note}, evidence_ids = ${evidenceIds}, updated_at = now() where id = ${existing.id}`
+        else await tx`insert into findings (inspection_id, position, area, observation, status, confidence, evidence_grade, created_by, evidence_ids)
+          values (${insp.id}, (select coalesce(max(position), 0) + 1 from findings where inspection_id = ${insp.id}),
+            ${c.label}, ${c.next.note}, 'ok', ${evidenceIds.length ? 'moderate' : 'limited'}, null, ${user.id}, ${evidenceIds})`
       }
     })
-  } catch (e) { redirect(`/staff/inspections/${insp.id}?error=${encodeURIComponent(e instanceof Error ? e.message : 'Could not save check.')}`) }
+  } catch (e) { back(e instanceof Error ? e.message : 'Could not save the checks.') }
   revalidatePath(`/staff/inspections/${insp.id}`)
 }
 

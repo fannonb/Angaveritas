@@ -4,6 +4,7 @@ import { useEffect,useState } from 'react'
 
 export default function PaystackPaymentStatus({ reference,initialStatus,invoiceHref,payHref,testMode }: { reference: string; initialStatus: string; invoiceHref: string; payHref: string; testMode: boolean }) {
   const [status,setStatus] = useState(initialStatus)
+  const [reportHref,setReportHref] = useState<string | null>(null)
   const [busy,setBusy] = useState(false)
   const [message,setMessage] = useState('')
   async function check(verify: boolean) {
@@ -12,7 +13,7 @@ export default function PaystackPaymentStatus({ reference,initialStatus,invoiceH
       const response = await fetch(`/api/payments/status?reference=${encodeURIComponent(reference)}`,{method:verify ? 'POST' : 'GET',cache:'no-store'})
       const result = await response.json()
       if (!response.ok) throw new Error(result.error ?? 'Payment status is unavailable.')
-      setStatus(result.status); setMessage(result.message ?? '')
+      setStatus(result.status); setReportHref(result.reportHref ?? null); setMessage(result.message ?? '')
     } catch (error) { setMessage(error instanceof Error ? error.message : 'Payment status is unavailable.') }
     finally { setBusy(false) }
   }
@@ -25,6 +26,7 @@ export default function PaystackPaymentStatus({ reference,initialStatus,invoiceH
     // eslint-disable-next-line react-hooks/exhaustive-deps
   },[reference])
   const ended = status === 'failed' || status === 'abandoned'
+  const reportReady = status === 'success' && reportHref !== null
   const titles: Record<string,string> = { success:'Payment received', failed:'Payment did not go through', abandoned:'Payment not completed', review:'Payment being checked by our team' }
   const descriptions: Record<string,string> = {
     success:'Your invoice is updated and your receipt is on its way by email.',
@@ -37,12 +39,13 @@ export default function PaystackPaymentStatus({ reference,initialStatus,invoiceH
   return <section className="panel panel-pad space-y-4" aria-live="polite">
     <h1 className="text-xl">{titles[status] ?? 'Checking your payment'}</h1>
     {testMode && <p className="hint">Test payment · no real money</p>}
-    <p>{descriptions[status] ?? 'Your payment is being checked.'}</p>
+    <p>{reportReady ? 'Your balance is paid and your receipt is on its way by email. Your report is open now.' : descriptions[status] ?? 'Your payment is being checked.'}</p>
     {message && <p className="hint">{message}</p>}
     <div className="flex flex-wrap gap-3">
+      {reportReady && <Link className="btn btn-primary" href={reportHref}>Read your report</Link>}
       {ended && <Link className="btn btn-primary" href={payHref}>Try again</Link>}
       {(status === 'pending' || status === 'initializing') && <button className="btn btn-secondary btn-small" disabled={busy} onClick={() => check(true)}>{busy ? 'Checking…' : 'Check again'}</button>}
-      <Link className={`btn ${ended ? 'btn-secondary' : 'btn-primary'} btn-small`} href={invoiceHref}>View invoice</Link>
+      <Link className={`btn ${ended || reportReady ? 'btn-secondary' : 'btn-primary'} btn-small`} href={invoiceHref}>View invoice</Link>
     </div>
     <p className="text-xs break-all text-muted">Reference: {reference}</p>
   </section>

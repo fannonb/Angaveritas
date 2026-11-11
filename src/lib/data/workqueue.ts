@@ -7,10 +7,14 @@ export type WorkTask = { key: string; label: string; task: string; owner: string
 export async function staffWorkQueue(userId: string, team: boolean) {
   return sql<WorkTask[]>`select * from (
     select 'request:'||r.id as key,r.reference||' · '||r.title as label,
-      case when r.status='submitted' then 'Review enquiry and prepare proposal' else 'Finish and send proposal' end as task,
+      case when r.status='submitted' then 'Review enquiry and prepare proposal'
+        when r.status='declined' then 'Client declined'||coalesce(': '||left(d.decline_reason,140),' (no reason given)')
+        else 'Finish and send proposal' end as task,
       u.full_name as owner,null::text as due_on,'Analyst'::text as waiting_on,'/staff/requests/'||r.reference as href,
       r.owner_id as assigned_to,false as review,2 as priority
-    from requests r left join users u on u.id=r.owner_id where r.status in ('submitted','in_review','declined')
+    from requests r left join users u on u.id=r.owner_id
+      left join lateral (select pr.decline_reason from proposals pr where pr.request_id=r.id and pr.status='declined' order by pr.version desc limit 1) d on true
+    where r.status in ('submitted','in_review','declined')
     union all
     select 'prepare:'||p.id,p.code||' · '||p.title,
       case when p.lead_analyst_id is null or p.field_agent_id is null then 'Assign the work team'

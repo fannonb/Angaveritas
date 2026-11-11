@@ -7,11 +7,11 @@ export default async function EngagementPanel({projectId,manager=false,admin=fal
   const current=work.find(w=>w.id===w.active_work_order_id)
   const hidden=(operation:string)=><><input type="hidden" name="projectId" value={projectId}/><input type="hidden" name="operation" value={operation}/></>
   return <div className="space-y-6">
-    {current&&<section className="panel panel-pad space-y-3">
+    {current&&<section className="panel panel-pad space-y-3" id="engagement">
       <p className="kicker">Current engagement</p><h2 className="text-lg">{current.title}</h2>
       <p className="prose-text">{current.scope||'Scope is in the accepted proposal.'}</p>
       {current.hold_reason&&<p className="alert alert-warn" role="status">Work on hold: {current.hold_reason}</p>}
-      <p className="hint">{current.brief_approved_version===current.brief_version?`Brief checked${current.approved_by_name?` by ${current.approved_by_name}`:''}.`:'The analyst must check the current brief against this scope before work starts.'} {current.due_on?`Report expected ${fmtDate(current.due_on)}.`:''}</p>
+      <p className="hint">{current.brief_approved_version===current.brief_version?`Brief checked${current.approved_by_name?` by ${current.approved_by_name}`:''}.`:!(current.onboarding_submitted_at&&current.data_consent_at)?'Waiting for the client to send the brief. You check it against this scope once it arrives.':'The client sent the brief. Check it against this scope below before work starts.'} {current.due_on?`Report expected ${fmtDate(current.due_on)}.`:''}</p>
       {manager&&current.onboarding_submitted_at&&current.data_consent_at&&current.brief_approved_version!==current.brief_version&&<form action={workflowAction} className="space-y-3">
         {hidden('approve_brief')}<input type="hidden" name="version" value={current.brief_version}/>
         <label className="label">Required site visits or work sessions<input className="input" name="sites" type="number" min="1" max="100" defaultValue={current.required_sites} required/></label>
@@ -32,8 +32,9 @@ export default async function EngagementPanel({projectId,manager=false,admin=fal
       {v.client_confirmed_at?<p className="hint">Access confirmed.</p>:<form action={workflowAction} className="space-y-2">{hidden('confirm_visit')}<input type="hidden" name="inspectionId" value={v.id}/><input type="hidden" name="version" value={v.schedule_version}/><label className="check"><input type="checkbox" name="agree" required/>The site contact is expecting the team and access is arranged.</label><button className="btn btn-secondary btn-small">Confirm access</button></form>}
       <details><summary>Request another date</summary><form action={workflowAction} className="space-y-3 mt-3">{hidden('case')}<input type="hidden" name="kind" value="reschedule"/><input type="hidden" name="inspectionId" value={v.id}/><label className="label">Preferred date<input className="input" type="date" name="date" required/></label><label className="label">Reason<textarea className="input" name="detail" minLength={10} required/></label><button className="btn btn-secondary btn-small">Request reschedule</button></form></details>
     </article>)}</section>}
-    <section className="panel panel-pad space-y-4"><h2 className="text-lg">Requests and decisions</h2>
-      {cases.length===0&&<p className="hint">No open requests. Questions and decisions will be tracked here.</p>}
+    {/* With nothing open, requests stay a one-line panel so they don't compete with the next step. */}
+    <details className="panel panel-pad space-y-4" open={cases.length>0}><summary className="cursor-pointer list-none"><h2 className="inline text-lg">Requests and decisions</h2> <span className="text-sm text-muted">{cases.length?`${cases.length} tracked`:'None open'}</span></summary>
+      {cases.length===0&&<p className="hint mt-3">Clarifications, issues, scope changes and cancellations are tracked here with an owner and a due date.</p>}
       {cases.filter(c=>manager||c.kind!=='report_correction').map(c=><article key={c.id} className="rounded border border-line p-4 space-y-2">
         <div className="flex flex-wrap justify-between gap-2"><strong>{c.title}</strong><span className="chip chip--plain">{c.status.replaceAll('_',' ')}</span></div><p className="prose-text">{c.detail}</p>
         {c.amount_kes&&<p>Additional fee: <strong>{kes(c.amount_kes)}</strong> · 60% deposit, balance before this engagement’s report.</p>}
@@ -50,6 +51,6 @@ export default async function EngagementPanel({projectId,manager=false,admin=fal
           {admin&&<><label className="label">Additional fee, KES (scope changes only)<input className="input" type="number" name="amount" min="1" max="100000000"/></label><label className="label">Proposed report date (scope changes only)<input className="input" type="date" name="date"/></label></>}
           <button className="btn btn-primary btn-small">Send request</button></form>
       </details>
-    </section>
+    </details>
   </div>
 }

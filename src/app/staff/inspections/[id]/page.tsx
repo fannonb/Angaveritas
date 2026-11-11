@@ -14,7 +14,8 @@ import { listContacts, projectFor } from '@/lib/data/projects'
 import { listAssignableStaff } from '@/lib/data/users'
 import { site } from '@/lib/site'
 import { fieldCollectionProblem } from '@/lib/workflow'
-import { deleteFindingAction, inspectionStatusAction, updateInspectionPlanAction, saveInspectionCheckAction, requestInspectionCorrectionAction, resolveInspectionCorrectionAction } from '../../actions'
+import { deleteFindingAction, inspectionStatusAction, updateInspectionPlanAction, requestInspectionCorrectionAction, resolveInspectionCorrectionAction } from '../../actions'
+import ChecksForm from './ChecksForm'
 import FileControls from '../../FileControls'
 
 export const metadata = { title: 'Inspection' }
@@ -214,10 +215,10 @@ export default async function InspectionPage({ params: paramsPromise, searchPara
                   projectId={p.id}
                   inspectionId={insp.id}
                   category="evidence"
-                  label="Take or add photos / documents"
                   accept="image/*,video/*,.pdf"
                   allowDrone
-                  hint="Upload photos, videos, drone footage, or documents (ID, stamp, registry, receipts). GPS coordinates are captured automatically when present."
+                  guided
+                  suggestions={checks.map((c) => c.label)}
                 />
               )}
               <EvidenceGallery files={evidence} staffControls={(f) => access.canManage || !locked ? <FileControls f={f} canManage={access.canManage} /> : null} />
@@ -231,52 +232,9 @@ export default async function InspectionPage({ params: paramsPromise, searchPara
                 <h2>Required checks</h2>
                 <span className="text-sm">{completed} of {required.length} recorded</span>
               </div>
-              <div className="panel-pad space-y-3">
-                <p className="hint">Record each objective from the brief. Marking an item checked automatically records a verified finding with the attached evidence.</p>
-                {checks.map(c => (
-                  <details key={c.id} className="rounded border border-line p-3" open={c.required && c.outcome === 'pending'}>
-                    <summary className="cursor-pointer font-semibold">
-                      {c.label} <span className="text-sm font-normal text-muted">· {c.outcome === 'pending' ? 'To do' : c.outcome === 'checked' ? 'Checked' : c.outcome === 'another_visit' ? 'Needs another visit' : 'Could not check'}{!c.required ? ' · no longer required' : ''}</span>
-                    </summary>
-                    {locked ? (
-                      <p className="prose-text mt-2">{c.note || 'No result recorded.'}</p>
-                    ) : (
-                      <form action={saveInspectionCheckAction} className="mt-3 space-y-3">
-                        <input type="hidden" name="inspectionId" value={insp.id} />
-                        <input type="hidden" name="checkId" value={c.id} />
-                        <label className="label">
-                          Outcome
-                          <select className="input" name="outcome" defaultValue={c.outcome === 'pending' ? 'checked' : c.outcome}>
-                            <option value="checked">Checked (Verified)</option>
-                            <option value="could_not_check">Could not check</option>
-                            <option value="another_visit">Needs another visit</option>
-                            <option value="pending">Still to do</option>
-                          </select>
-                        </label>
-                        <label className="label">
-                          Observations / notes
-                          <textarea className="input" name="note" defaultValue={c.note || (c.label ? `Confirmed: ${c.label}` : '')} minLength={3} required maxLength={4000} placeholder="Describe what you observed on site" />
-                        </label>
-                        {evidence.length > 0 && (
-                          <fieldset className="space-y-1">
-                            <legend className="label">Supporting photos or documents</legend>
-                            {evidence.map(e => {
-                              const isChecked = c.evidence_ids.length > 0 ? c.evidence_ids.includes(e.id) : true
-                              return (
-                                <label key={e.id} className="check text-sm">
-                                  <input type="checkbox" name="evidenceIds" value={e.id} defaultChecked={isChecked} />
-                                  {e.evidence_code} · {e.filename}
-                                </label>
-                              )
-                            })}
-                          </fieldset>
-                        )}
-                        <button className="btn btn-secondary btn-small" type="submit">Save check & record finding</button>
-                      </form>
-                    )}
-                  </details>
-                ))}
-              </div>
+              {locked
+                ? <ul className="divide-y divide-line">{checks.map(c => <li key={c.id} className="px-6 py-3 text-sm"><p className="font-semibold">{c.label} <span className="font-normal text-muted">· {c.outcome === 'pending' ? 'Not recorded' : c.outcome === 'checked' ? 'Checked' : c.outcome === 'another_visit' ? 'Needs another visit' : 'Could not check'}</span></p>{c.note && <p className="prose-text mt-1">{c.note}</p>}</li>)}</ul>
+                : <ChecksForm inspectionId={insp.id} checks={checks.map(c => ({ id: c.id, label: c.label, required: c.required, outcome: c.outcome, note: c.note, evidence_ids: c.evidence_ids }))} evidence={evidence.map(e => ({ id: e.id, evidence_code: e.evidence_code, filename: e.filename, caption: e.caption }))} />}
             </section>
           )}
 

@@ -26,7 +26,7 @@ async function run<T>(context: BrowserContext, script: string): Promise<T> {
 }
 
 describe.skipIf(process.env.RUN_DATABASE_TESTS !== '1')('device upload queue', () => {
-  afterAll(() => fs.rmSync(profile, { recursive: true, force: true }))
+  afterAll(() => fs.rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 })) // Chrome may still hold files briefly on Windows
 
   it('keeps queued photos and their save state across a browser restart', async () => {
     let context = await open()

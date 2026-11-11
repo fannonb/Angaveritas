@@ -293,15 +293,17 @@ try {
     // Explicitly exercise the manual integrity-review branch; a PNG without EXIF is not itself a flagged file.
     await db`update files set integrity_flag='Synthetic metadata discrepancy for review test' where id=${evidenceId}`
     await agent.reload()
-    const checkForms=agent.locator('form').filter({has:agent.locator('[name="checkId"]')})
-    for (let c=0;c<await checkForms.count();c++) {
-      const checkForm=checkForms.nth(c)
-      await checkForm.locator('[name="outcome"]').selectOption('checked')
-      await checkForm.locator('[name="note"]').fill('Site and road observed; supporting image attached.')
-      await checkForm.locator('[name="evidenceIds"]').check()
-      await checkForm.getByRole('button',{name:'Save check & record finding',exact:true}).click()
-      await agent.waitForLoadState('networkidle')
+    // All required checks are one form: choose each outcome, describe it, pick the photo, then save once.
+    const checkRows=agent.locator('[data-check]')
+    for (let c=0;c<await checkRows.count();c++) {
+      const row=checkRows.nth(c)
+      await row.getByText('Checked',{exact:true}).click()
+      await row.locator('textarea').fill('Site and road observed; supporting image attached.')
+      await row.locator('input[type="checkbox"]').first().check({force:true})
     }
+    await agent.getByRole('button',{name:'Save checks',exact:true}).click()
+    await agent.waitForLoadState('networkidle')
+    await agent.getByText('All checks saved',{exact:true}).waitFor()
     await agent.locator('summary').filter({hasText:'Add an additional finding'}).click()
     const findingForm=agent.locator('form').filter({has:agent.getByRole('button',{name:'Add finding',exact:true})})
     await findingForm.locator('[name="area"]').fill('Physical existence')

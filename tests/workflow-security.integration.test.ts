@@ -106,6 +106,13 @@ describe.skipIf(process.env.RUN_DATABASE_TESTS !== '1')('workflow boundary regre
     await state.sql`update inspections set status='reviewed',reviewed_by=${admin},review_exception='Admin exception: checked every source; no separate reviewer available' where id=${x.i}`
     expect((await state.sql`select status from inspections where id=${x.i}`)[0].status).toBe('reviewed')
   })
+  it('lets an admin release a visit they carried out without an exception note', async () => {
+    const x = await fixture()
+    await state.sql`update inspections set agent_id=${admin} where id=${x.i}`
+    await state.sql`update inspections set status='submitted' where id=${x.i}`
+    await state.sql`update inspections set status='reviewed',reviewed_by=${admin} where id=${x.i}`
+    expect((await state.sql`select status from inspections where id=${x.i}`)[0].status).toBe('reviewed')
+  })
   it('lets an admin review a visit they carried out themselves', async () => {
     const x = await fixture()
     await state.sql`update inspections set agent_id=${admin} where id=${x.i}`

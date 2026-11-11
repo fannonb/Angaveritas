@@ -32,18 +32,29 @@ export function staffNextStep(
   reports: { status: string }[],
   flaggedEvidence: number,
   unpaidBalanceKes = 0,
+  depositReferencePending = false,
 ): NextStep | null {
   if (p.stage === 'closed') return null
   if(p.work_hold_reason)return {title:'Work on hold',text:p.work_hold_reason,tab:'overview'}
-  if(p.onboarding_submitted_at && p.data_consent_at && (p.brief_approved===false||p.brief_approved===null))return {title:'Review the service brief',text:'Check the current brief against the agreed scope before scheduling.',tab:'overview'}
+  const briefIn = !!p.onboarding_submitted_at && !!p.data_consent_at
+  const briefUnchecked = briefIn && (p.brief_approved===false||p.brief_approved===null)
   const live = inspections.filter((i) => i.status !== 'cancelled')
   if (live.length === 0 || (['planning','onboarding'].includes(p.stage) && reports.some(r => r.status==='published') && live.every(i => i.status==='reviewed'))) {
-    if (!p.onboarding_submitted_at || !p.data_consent_at) return { title: 'Waiting for client onboarding', text: 'The client must complete onboarding and consent before fieldwork. Send a reminder if it is taking long.', tab: 'messages' }
-    if (!p.lead_analyst_id || !p.field_agent_id) return { title: 'Assign the team', text: 'Choose a lead analyst and a field agent before scheduling the visit.', tab: 'overview' }
-    if (!['deposit_received', 'paid', 'waived'].includes(p.payment_status)) return { title: 'Record the payment', text: 'Fieldwork can start once the required payment or an authorised waiver is recorded.', tab: 'operations' }
-    if (p.nda_status && !['none', 'signed'].includes(p.nda_status)) return { title: 'Complete the confidentiality agreement', text: 'The client requested an NDA before work starts. Prepare it and ask them to sign.', tab: 'agreement' }
+    // After acceptance: first what the team can do now, then what the client still owes, then the visit.
+    if (!p.lead_analyst_id || !p.field_agent_id) return { title: 'Assign the team', text: 'Choose a lead analyst and a field agent now, so they can prepare while the client completes the brief and deposit.', tab: 'overview' }
+    if (p.nda_status === 'requested') return { title: 'Prepare the confidentiality agreement', text: 'The client asked for an NDA before work starts. Upload it under Agreement and send it for signature.', tab: 'agreement' }
+    if (briefUnchecked) return { title: 'Check the brief against the scope', text: 'The client has sent the brief. Confirm it matches the accepted proposal and contact restrictions, then approve it for planning.', tab: 'overview' }
+    const paid = ['deposit_received', 'paid', 'waived'].includes(p.payment_status)
+    if (!paid && depositReferencePending) return { title: 'Confirm the deposit', text: 'The client sent a payment reference. An admin checks it against the bank or M-Pesa records and records it on the Billing tab.', tab: 'operations' }
+    const owed = [
+      !briefIn && 'send the brief and consent',
+      !paid && 'pay the deposit',
+      p.nda_status === 'prepared' && 'sign the confidentiality agreement',
+    ].filter(Boolean) as string[]
+    if (owed.length) return { title: 'Waiting on the client', text: `The client still needs to ${owed.length > 1 ? `${owed.slice(0, -1).join(', ')} and ${owed[owed.length - 1]}` : owed[0]}. Nothing else is needed from the team yet; send a reminder if it is taking long.`, tab: 'messages' }
     return { title: 'Schedule the site visit', text: 'Everything is in place. Create the inspection and set a date.', tab: 'inspections' }
   }
+  if (briefUnchecked) return {title:'Check the brief against the scope',text:'The brief changed. Confirm it still matches the agreed scope before further fieldwork.',tab:'overview'}
   if (live.some(i => ['scheduled','in_progress'].includes(i.status))) {
     const problem = fieldworkProblem(p,p.field_agent_id)
     if (problem) return { title:'Visit preparation is incomplete',text:problem,tab:!p.onboarding_submitted_at || !p.data_consent_at ? 'messages' : !['deposit_received','paid','waived'].includes(p.payment_status) ? 'operations' : p.nda_status && !['none','signed'].includes(p.nda_status) ? 'agreement' : 'overview' }
@@ -147,7 +158,7 @@ export function clientNextStep(
 export type RequestNextStep = { title: string; text: string; action?: 'take' | 'start' | 'proposal' | 'message' | 'project' }
 
 /** The next thing staff should do on a request, shown above the proposal. */
-export function staffRequestNextStep(r: { status: RequestStatus; owner_id: string | null }, hasDraft: boolean): RequestNextStep {
+export function staffRequestNextStep(r: { status: RequestStatus; owner_id: string | null }, hasDraft: boolean, declineReason: string | null = null): RequestNextStep {
   switch (r.status) {
     case 'submitted':
       return r.owner_id
@@ -160,7 +171,13 @@ export function staffRequestNextStep(r: { status: RequestStatus; owner_id: strin
     case 'proposal_sent':
       return { title: 'Waiting for the client', text: 'They can accept or decline online. If you have not heard back in a few days, send them a message.', action: 'message' }
     case 'declined':
-      return { title: 'The client declined', text: 'Ask what would work for them and send a revised proposal, or close the request.', action: 'proposal' }
+      return {
+        title: 'The client declined',
+        text: declineReason
+          ? `Their reason: “${declineReason}”. Ask what would work for them and send a revised proposal, or close the request.`
+          : 'They gave no reason. Ask what would work for them and send a revised proposal, or close the request.',
+        action: 'proposal',
+      }
     case 'accepted':
       return { title: 'Accepted', text: 'The work continues on the project.', action: 'project' }
     case 'withdrawn':
@@ -188,7 +205,7 @@ export function requestStatusTargets(from: RequestStatus): RequestStatus[] {
  * explicit decision or communication events instead.
  */
 export const TECHNICAL_EVENT_PATTERN =
-  '^(projects|requests|proposals|inspections|inspection_checks|findings|files|reports|project_contacts|enquiries|invoices|payments|payment_notices|service_requests|monitoring_cycles|project_alerts|project_sites)\\.(insert|update|delete)$'
+  '^(projects|requests|proposals|inspections|inspection_checks|findings|files|reports|project_contacts|enquiries|invoices|payments|payment_notices|service_requests|monitoring_cycles|project_alerts|project_sites|work_orders|workflow_cases)\\.(insert|update|delete)$'
 
 const technicalEvent = new RegExp(TECHNICAL_EVENT_PATTERN)
 

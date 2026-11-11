@@ -71,10 +71,21 @@ describe('upload content checks', () => {
 
 describe('staff next step', () => {
   const base = { stage: 'planning' as const, onboarding_submitted_at: new Date(), data_consent_at: new Date(), payment_status: 'paid', lead_analyst_id: 'lead', field_agent_id: 'agent' }
+  it('after acceptance, puts team work first and then names everything the client still owes', () => {
+    const fresh = { ...base, onboarding_submitted_at: null, data_consent_at: null, payment_status: 'awaiting_payment', field_agent_id: null }
+    expect(staffNextStep(fresh, [], [], 0)?.title).toBe('Assign the team')
+    const waiting = staffNextStep({ ...fresh, field_agent_id: 'agent' }, [], [], 0)
+    expect(waiting?.title).toBe('Waiting on the client')
+    expect(waiting?.text).toContain('send the brief and consent and pay the deposit')
+    expect(waiting?.tab).toBe('messages')
+    expect(staffNextStep({ ...base, payment_status: 'awaiting_payment' }, [], [], 0, 0, true)?.title).toBe('Confirm the deposit')
+    expect(staffNextStep({ ...base, brief_approved: false }, [], [], 0)?.title).toBe('Check the brief against the scope')
+    expect(staffNextStep({ ...base, nda_status: 'requested' }, [], [], 0)?.tab).toBe('agreement')
+  })
   it('walks a project from onboarding to delivery', () => {
-    expect(staffNextStep({ ...base, onboarding_submitted_at: null }, [], [], 0)?.title).toBe('Waiting for client onboarding')
+    expect(staffNextStep({ ...base, onboarding_submitted_at: null }, [], [], 0)?.title).toBe('Waiting on the client')
     expect(staffNextStep({ ...base, field_agent_id: null }, [], [], 0)?.tab).toBe('overview')
-    expect(staffNextStep({ ...base, payment_status: 'awaiting_payment' }, [], [], 0)?.tab).toBe('operations')
+    expect(staffNextStep({ ...base, payment_status: 'awaiting_payment' }, [], [], 0)?.text).toContain('pay the deposit')
     expect(staffNextStep(base, [], [], 0)?.title).toBe('Schedule the site visit')
     expect(staffNextStep(base, [{ status: 'scheduled' }], [], 0)?.title).toBe('Visit booked')
     expect(staffNextStep(base, [{ status: 'scheduled', scheduled_for: null }], [], 0)?.title).toBe('Set the visit date')
@@ -124,6 +135,12 @@ describe('client next step', () => {
 })
 
 describe('staff request next step', () => {
+  it('shows the client’s decline reason on the next step, or says none was given', () => {
+    const declined = staffRequestNextStep({ status: 'declined', owner_id: 'a' }, false, 'The price is too high')
+    expect(declined.title).toBe('The client declined')
+    expect(declined.text).toContain('The price is too high')
+    expect(staffRequestNextStep({ status: 'declined', owner_id: 'a' }, false).text).toContain('no reason')
+  })
   it('names one action for each request status', () => {
     expect(staffRequestNextStep({ status: 'submitted', owner_id: null }, false).action).toBe('take')
     expect(staffRequestNextStep({ status: 'submitted', owner_id: 'a' }, false).action).toBe('start')

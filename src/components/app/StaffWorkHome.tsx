@@ -399,12 +399,13 @@ export default async function StaffWorkHome({ searchParams: promise }: { searchP
   const firstName = user.full_name.split(' ')[0]
 
   const updates = notes.length > 0 && (
-    <details className="panel" id="updates">
+    <details className="panel" id="updates" open>
       <summary className="panel-head cursor-pointer"><h2>Recent updates ({notes.length})</h2></summary>
       <ul className="divide-y divide-line">
         {notes.map((n) => (
           <li key={n.id} className="px-6 py-3 text-sm">
             {n.href ? <Link href={n.href}>{n.title}</Link> : n.title}
+            {n.body && <p className="mt-1 whitespace-pre-line text-ink-2">{n.body}</p>}
             <span className="block text-xs text-muted">{fmtDateTime(n.created_at)}</span>
           </li>
         ))}

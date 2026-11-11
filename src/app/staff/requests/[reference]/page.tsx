@@ -62,7 +62,7 @@ export default async function StaffRequest({ params: paramsPromise }: { params: 
   const latestSent = proposals.find((p) => p.status !== 'draft')
   const canPropose = ['submitted', 'in_review', 'proposal_sent', 'declined'].includes(r.status)
   const statusTargets = requestStatusTargets(r.status)
-  const next = staffRequestNextStep(r, !!draft)
+  const next = staffRequestNextStep(r, !!draft, latestSent?.status === 'declined' ? latestSent.decline_reason : null)
 
   const defaults: ProposalDefaults = draft
     ? {

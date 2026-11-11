@@ -17,7 +17,7 @@ import { listProjectFiles } from '@/lib/data/files'
 import { listInspections } from '@/lib/data/inspections'
 import { listMessages, markRead } from '@/lib/data/messages'
 import { listContacts, projectByCodeFor, projectEvents } from '@/lib/data/projects'
-import { unpaidInvoices } from '@/lib/data/operations'
+import { projectDepositDue, unpaidInvoices } from '@/lib/data/operations'
 import { listReports } from '@/lib/data/reports'
 import { listAssignableStaff } from '@/lib/data/users'
 import { paymentStatusLabels } from '@/lib/labels'
@@ -63,9 +63,10 @@ export default async function StaffProject({ params: paramsPromise, searchParams
     access.canManage ? unpaidInvoices(p.id) : [],
   ])
   if (tab === 'messages') await markRead({ projectId: p.id }, user.id)
+  const deposit = access.canManage ? await projectDepositDue(p.id) : null
   const flagged = evidence.filter((e) => e.integrity_flag && !e.visible_to_client).length
   const href = (t: Tab) => `/staff/projects/${p.code}?tab=${t}`
-  const next = access.canManage ? staffNextStep(p, inspections.filter(i=>i.work_order_id===p.active_work_order_id), reports.filter(r=>r.work_order_id===p.active_work_order_id), flagged, unpaid.reduce((s, u) => s + u.unpaid_kes, 0)) : null
+  const next = access.canManage ? staffNextStep(p, inspections.filter(i=>i.work_order_id===p.active_work_order_id), reports.filter(r=>r.work_order_id===p.active_work_order_id), flagged, unpaid.reduce((s, u) => s + u.unpaid_kes, 0), !!deposit?.payment_notified) : null
   const labels: Record<Tab, string> = {
     overview: 'Overview',
     site: `${profile.tab} & files`,
@@ -165,13 +166,14 @@ export default async function StaffProject({ params: paramsPromise, searchParams
         )}
       </div>
 
+      {/* From acceptance until the visit is booked, one ordered checklist says what is left and who it waits on. */}
+      {tab === 'overview' && access.canManage && ['onboarding','planning'].includes(p.stage) && !hasLiveVisit && (
+        <VisitReadiness project={p} deposit={deposit} admin={user.role === 'admin'} />
+      )}
       {access.canManage && (tab === 'overview' || tab === 'settings') && <EngagementPanel projectId={p.id} manager admin={user.role==='admin'} />}
       {tab === 'overview' && (
         <div className="grid gap-6 xl:grid-cols-[1.5fr_1fr] xl:items-start">
           <div className="space-y-6">
-            {access.canManage && !['delivered','monitoring','closed'].includes(p.stage) && (
-              <VisitReadiness project={p} staff />
-            )}
             {planHere && (
               <section className="panel panel-pad" id="plan-visit">
                 <h2 className="text-lg">Schedule the {profile.activity.toLowerCase()}</h2>
