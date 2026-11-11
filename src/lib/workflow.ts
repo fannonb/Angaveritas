@@ -22,6 +22,13 @@ export function fieldCollectionProblem(
 
 export type NextStep = { title: string; text: string; tab: 'overview' | 'inspections' | 'evidence' | 'reports' | 'messages' | 'operations' | 'agreement' }
 
+// A closed project has no next step for the team. An admin can reopen it if the client still needs work.
+export function closedProjectNextStep(isAdmin: boolean): NextStep {
+  return isAdmin
+    ? { title: 'This project is closed', text: 'Reopen it if the client still needs work from the team. Their reports and messages stay as they are.', tab: 'overview' }
+    : { title: 'This project is closed', text: 'Only an admin can reopen a closed project.', tab: 'overview' }
+}
+
 /**
  * The single most useful thing staff can do next on a project, shown at the top of the project page.
  * `unpaidBalanceKes` is money still owed on issued invoices after the deposit (0 when settled).
@@ -129,7 +136,7 @@ export function clientNextStep(
   if(p.work_hold_reason)return {title:'Work is on hold',text:p.work_hold_reason,action:{label:'View request and next steps',href:`${base}?tab=settings`}}
   if (pendingInvoice && (p.stage==='closed' || (p.onboarding_submitted_at && (!('data_consent_at' in p) || p.data_consent_at)))) return {title:'Checking your payment status',text:`Payment on ${pendingInvoice} is being checked. Please wait for confirmation before paying again. You can check its status in Payments.`,action:{label:'Check payment status',href:`${base}?tab=operations`}}
   if (p.stage === 'closed' && reportLocked) return { title: 'Pay the remaining balance', text: `${reportLocked.amount} is still due for ${reportLocked.invoice}. Your report opens once it is settled.`, action: { label: 'View invoice & pay', href: `${base}?tab=operations` } }
-  if (p.stage === 'closed') return { title: 'This project is complete', text: 'Your reports and evidence stay here. If you need another visit, ask for a follow-up.', action: { label: 'Request a follow-up', href: `/estimate?project=${p.code}` } }
+  if (p.stage === 'closed') return { title: 'This project is complete', text: 'Your reports and evidence stay here. If you need another visit, ask for a follow-up. If something is still outstanding, ask us to reopen.', action: { label: 'Request a follow-up', href: `/estimate?project=${p.code}` } }
   if (!p.onboarding_submitted_at) return { title: `Complete your ${profile.tab.toLowerCase()}`, text: profile.intro, action: { label: `Add ${profile.tab.toLowerCase()}`, href: `${base}?tab=onboarding` } }
   if ('data_consent_at' in p && !p.data_consent_at) return { title:'Fieldwork is paused',text:'Your consent is withdrawn. Contact your analyst to discuss what happens next, or renew consent under Project settings & privacy.',action:{label:'Contact your analyst',href:`${base}?tab=messages`} }
   if (due?.paymentNotified) return {title:'Confirming your payment',text:`We have your payment reference for invoice ${due.invoice}. The payment team will check the funds and update your balance. No further payment is needed while this is being checked.`}

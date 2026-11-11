@@ -69,6 +69,27 @@ export async function createCase(projectId: string, actorId: string, input: {kin
   })
 }
 
+// A client asks the team to reopen a closed project. The request is a complaint case; only an admin reopens.
+export const REOPEN_REQUEST = 'Reopen request: '
+
+export async function openReopenRequest(projectId: string) {
+  const [row] = await sql<{ id: string; created_at: Date; reason: string }[]>`
+    select id, created_at, regexp_replace(detail, '^Reopen request: ', '') as reason from workflow_cases
+    where project_id = ${projectId} and kind = 'complaint' and detail like ${REOPEN_REQUEST + '%'} and status in ('open','awaiting_client')
+    order by created_at desc limit 1`
+  return row ?? null
+}
+
+export async function requestReopen(projectId: string, clientId: string, reason: string) {
+  const text = reason.trim()
+  if (text.length < 10) throw new Error('Tell us in at least 10 characters what still needs attention.')
+  const [p] = await sql<{ stage: string }[]>`select stage from projects where id = ${projectId}`
+  if (!p || p.stage !== 'closed') throw new Error('Only a closed project can be reopened.')
+  if (await openReopenRequest(projectId)) throw new Error('You have already asked us to reopen this project. Our team will reply soon.')
+  const id = await createCase(projectId, clientId, { kind: 'complaint', detail: REOPEN_REQUEST + text })
+  await withActor(clientId, async tx => tx`update workflow_cases set title = 'Reopen requested by client' where id = ${id}`)
+}
+
 export async function respondCase(projectId:string,caseId:string,actorId:string,decision:string,note:string) {
   if(note.trim().length<5) throw new Error('Add a response of at least five characters.')
   await withActor(actorId,async tx=>{

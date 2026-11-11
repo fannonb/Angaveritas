@@ -19,6 +19,7 @@ import { assignProjectTeam } from '@/lib/data/projects'
 import { setDisabled, setStaffRole } from '@/lib/data/users'
 import { listMessages, postMessage, markRead, clientUnreadCount, threadsAwaitingReply, dismissReply } from '@/lib/data/messages'
 import { submitPaymentNotice, recordPayment, configureMonitoring, generateMonitoringCycles, issueInvoice, completeProjectByClient, reopenProject } from '@/lib/data/operations'
+import { requestReopen } from '@/lib/data/engagements'
 import { staffWorkQueue } from '@/lib/data/workqueue'
 import { adminAttention } from '@/lib/data/attention'
 import { revenueSummary } from '@/lib/data/revenue'
@@ -178,8 +179,14 @@ describe.skipIf(process.env.RUN_DATABASE_TESTS !== '1')('workflow boundary regre
     expect(await stage()).toBe('closed')
     await expect(completeProjectByClient(x.p, client)).rejects.toThrow('once its report is ready')
     await expect(reopenProject(x.p, admin, 'no')).rejects.toThrow('reason')
+    await expect(requestReopen(x.p, client, 'short')).rejects.toThrow('10 characters')
+    await requestReopen(x.p, client, 'The access road photos are missing from the report')
+    await expect(requestReopen(x.p, client, 'A second request about the same project')).rejects.toThrow('already asked')
+    expect((await state.sql`select count(*)::int as n from workflow_cases where project_id=${x.p} and status='open' and detail like 'Reopen request: %'`)[0].n).toBe(1)
     await reopenProject(x.p, admin, 'Client asked us to review the access road')
     expect(await stage()).toBe('delivered')
+    expect((await state.sql`select count(*)::int as n from work_orders where project_id=${x.p} and completed_at is not null`)[0].n).toBe(0)
+    expect((await state.sql`select status from workflow_cases where project_id=${x.p} and detail like 'Reopen request: %'`)[0].status).toBe('resolved')
   })
   it('counts overdue balances in the admin queue until they are paid', async () => {
     const x = await fixture()

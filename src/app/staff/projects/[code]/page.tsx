@@ -18,10 +18,11 @@ import { listInspections } from '@/lib/data/inspections'
 import { listMessages, markRead } from '@/lib/data/messages'
 import { listContacts, projectByCodeFor, projectEvents } from '@/lib/data/projects'
 import { projectDepositDue, unpaidInvoices } from '@/lib/data/operations'
+import { openReopenRequest } from '@/lib/data/engagements'
 import { listReports } from '@/lib/data/reports'
 import { listAssignableStaff } from '@/lib/data/users'
 import { paymentStatusLabels } from '@/lib/labels'
-import { projectProgress, staffNextStep } from '@/lib/workflow'
+import { closedProjectNextStep, projectProgress, staffNextStep } from '@/lib/workflow'
 import { createInspectionAction, createReportAction, staffAddContactAction, staffMessageAction, staffRemoveContactAction } from '../../actions'
 import FileControls from '../../FileControls'
 import ManageForm from './ManageForm'
@@ -66,7 +67,8 @@ export default async function StaffProject({ params: paramsPromise, searchParams
   const deposit = access.canManage ? await projectDepositDue(p.id) : null
   const flagged = evidence.filter((e) => e.integrity_flag && !e.visible_to_client).length
   const href = (t: Tab) => `/staff/projects/${p.code}?tab=${t}`
-  const next = access.canManage ? staffNextStep(p, inspections.filter(i=>i.work_order_id===p.active_work_order_id), reports.filter(r=>r.work_order_id===p.active_work_order_id), flagged, unpaid.reduce((s, u) => s + u.unpaid_kes, 0), !!deposit?.payment_notified) : null
+  const reopenAsk = p.stage === 'closed' ? await openReopenRequest(p.id) : null
+  const next = access.canManage ? (p.stage === 'closed' ? closedProjectNextStep(user.role === 'admin') : staffNextStep(p, inspections.filter(i=>i.work_order_id===p.active_work_order_id), reports.filter(r=>r.work_order_id===p.active_work_order_id), flagged, unpaid.reduce((s, u) => s + u.unpaid_kes, 0), !!deposit?.payment_notified)) : null
   const labels: Record<Tab, string> = {
     overview: 'Overview',
     site: `${profile.tab} & files`,
@@ -151,6 +153,19 @@ export default async function StaffProject({ params: paramsPromise, searchParams
           {next.tab !== tab && !(planHere && tab === 'overview') && <Link className="btn btn-primary btn-small" href={href(next.tab)}>Go to {labels[next.tab].replace(/ \(.*\)$/, '')}</Link>}
         </section>
       )}
+      {p.stage === 'closed' && user.role === 'admin' && (
+        <details id="reopen-project" className="panel panel-pad" open={!!reopenAsk}>
+          <summary className="cursor-pointer font-semibold">Reopen project</summary>
+          {reopenAsk && <p className="alert alert-warn mt-4">The client asked us to reopen on {fmtDate(reopenAsk.created_at)}: “{reopenAsk.reason}”. Reopening below closes the request.</p>}
+          <form action={staffOperationsAction} className="mt-4 space-y-3">
+            <p className="hint">The client sees it as open again, and their reports and messages stay as they are. Use this when something is still outstanding and the client needs more work from the team, without a new follow-up project.</p>
+            <input type="hidden" name="projectId" value={p.id} />
+            <input type="hidden" name="operation" value="reopen_project" />
+            <label className="label">Reason<input className="input" name="reason" required minLength={5} maxLength={500} placeholder="e.g. Client asked us to review the access road" /></label>
+            <button className="btn btn-secondary btn-small">Reopen project</button>
+          </form>
+        </details>
+      )}
       {!access.canManage && flagged > 0 && <p className="alert alert-warn">{flagged} evidence item{flagged > 1 ? 's' : ''} failed the automatic integrity check and {flagged > 1 ? 'are' : 'is'} held back from the client. <Link href={href('evidence')}>Check evidence</Link></p>}
 
       <div className="flex flex-wrap items-center gap-2">
@@ -227,18 +242,6 @@ export default async function StaffProject({ params: paramsPromise, searchParams
                 <ManageForm p={p} admin={user.role === 'admin'} owedKes={unpaid.reduce((s, u) => s + u.unpaid_kes, 0)} />
               </div>
             </details>
-            {p.stage === 'closed' && user.role === 'admin' && (
-              <section className="panel panel-pad space-y-3">
-                <h2 className="text-lg">Reopen project</h2>
-                <p className="hint">The client sees it as open again, and their reports and messages stay as they are. Use this when the client needs more work from the team without a new follow-up project.</p>
-                <form action={staffOperationsAction} className="flex flex-wrap items-end gap-3">
-                  <input type="hidden" name="projectId" value={p.id} />
-                  <input type="hidden" name="operation" value="reopen_project" />
-                  <label className="label">Reason<input className="input" name="reason" required minLength={5} maxLength={500} placeholder="e.g. Client asked us to review the access road" /></label>
-                  <button className="btn btn-secondary btn-small">Reopen project</button>
-                </form>
-              </section>
-            )}
           </div>
           <div className="space-y-6">
             <section className="panel panel-pad">

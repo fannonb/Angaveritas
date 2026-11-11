@@ -169,6 +169,8 @@ export async function reopenProject(projectId: string, actorId: string, reason: 
     if (cancelled) throw new Error('This project was cancelled. Start a follow-up project instead.')
     const [published] = await tx`select 1 from reports where project_id = ${projectId} and status = 'published' limit 1`
     if (!published) throw new Error('Only a project with a published report can be reopened.')
+    await tx`update work_orders set completed_at = null where project_id = ${projectId} and completed_at is not null`
+    await tx`update workflow_cases set status = 'resolved', resolution = 'Reopened by the team.', resolved_by = ${actorId}, resolved_at = now() where project_id = ${projectId} and kind = 'complaint' and detail like 'Reopen request: %' and status in ('open','awaiting_client')`
     await tx`update projects set stage = 'delivered', closed_at = null where id = ${projectId}`
   })
 }

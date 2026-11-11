@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { clientNextStep, projectProgress, fieldworkProblem, filePermission, isTechnicalAuditEvent, projectTransitionProblem, reportContentProblems, requestStatusTargets, requestTransitionAllowed, staffNextStep, staffRequestNextStep } from '@/lib/workflow'
+import { clientNextStep, closedProjectNextStep, projectProgress, fieldworkProblem, filePermission, isTechnicalAuditEvent, projectTransitionProblem, reportContentProblems, requestStatusTargets, requestTransitionAllowed, staffNextStep, staffRequestNextStep } from '@/lib/workflow'
 import { uploadProblem } from '@/lib/upload-validation'
 
 const ready = { onboarding_submitted_at: new Date(), data_consent_at: new Date(), payment_status: 'paid', lead_analyst_id: 'lead' }
@@ -167,5 +167,12 @@ describe('project progress', () => {
   it('starts with the client brief and finishes when the report can be read', () => {
     expect(current(projectProgress({ ...p, onboarding_submitted_at: null }, [], [], 18800, (d) => d))?.key).toBe('brief')
     expect(current(projectProgress(p, [{ status: 'reviewed', scheduled_for: '2026-11-11' }], [{ status: 'published' }], 0, (d) => d))).toBeUndefined()
+  })
+})
+
+describe('closed project next step', () => {
+  it('tells an admin they can reopen a closed project and tells others only an admin can', () => {
+    expect(closedProjectNextStep(true).text).toMatch(/Reopen it/)
+    expect(closedProjectNextStep(false).text).toMatch(/Only an admin/)
   })
 })

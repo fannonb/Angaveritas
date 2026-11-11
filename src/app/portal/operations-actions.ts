@@ -4,6 +4,7 @@ import { revalidatePath } from 'next/cache'
 import { requireClient } from '@/lib/auth/session'
 import { projectFor } from '@/lib/data/projects'
 import { completeProjectByClient, serviceRequest, submitPaymentNotice } from '@/lib/data/operations'
+import { requestReopen } from '@/lib/data/engagements'
 import { withActor } from '@/lib/db'
 import { logEvent, notifyTeam } from '@/lib/activity'
 import { formText } from '@/lib/validation'
@@ -13,7 +14,7 @@ export async function clientOperationsAction(form: FormData) {
   if (!access?.isClient) return
   const p = access.project
   const operation = String(form.get('operation') ?? '')
-  const returnTab = operation === 'nda' ? 'agreement' : operation === 'request' ? 'settings' : operation === 'monitoring_accept' ? 'monitoring' : operation === 'complete_project' ? 'overview' : 'operations'
+  const returnTab = operation === 'nda' ? 'agreement' : operation === 'request' ? 'settings' : operation === 'monitoring_accept' ? 'monitoring' : operation === 'complete_project' || operation === 'request_reopen' ? 'overview' : 'operations'
   try {
     if (operation === 'payment_notice') {
       await submitPaymentNotice(p.id,user.id,{invoiceId:String(form.get('invoiceId') ?? ''),amount:Number(form.get('amount')),reference:formText(form,'reference',200) ?? '',note:formText(form,'note',2000) ?? ''})
@@ -45,6 +46,10 @@ export async function clientOperationsAction(form: FormData) {
       await completeProjectByClient(p.id,user.id)
       await logEvent({actorId:user.id,projectId:p.id,type:'project.completed',summary:'Client marked the project complete',clientVisible:true})
       await notifyTeam({title:`${p.code}: client marked the project complete`,body:'Messages and follow-up requests stay open.',href:`/staff/projects/${p.code}`,staffIds:[p.lead_analyst_id]})
+    } else if (operation === 'request_reopen') {
+      const reason = formText(form,'reason',2000) ?? ''
+      await requestReopen(p.id,user.id,reason)
+      await notifyTeam({title:`${p.code}: client asked to reopen the project`,body:reason,href:`/staff/projects/${p.code}`,staffIds:[p.lead_analyst_id]})
     } else if (operation === 'acknowledge') {
       await withActor(user.id,async tx => tx`update project_alerts set acknowledged_at=coalesce(acknowledged_at,now()) where id=${String(form.get('alertId'))} and project_id=${p.id}`)
     } else throw new Error('Unknown operation.')

@@ -14,7 +14,9 @@ import { listProjectFiles, scanningEnabled } from '@/lib/data/files'
 import { listInspections, listProjectFindings } from '@/lib/data/inspections'
 import { listMessages, markRead } from '@/lib/data/messages'
 import { projectBalanceDue, projectDepositDue, projectPaymentPending, reportLock, unpaidInvoices } from '@/lib/data/operations'
+import { openReopenRequest } from '@/lib/data/engagements'
 import CompleteProjectCard from '@/components/app/CompleteProjectCard'
+import ReopenRequestCard from '@/components/app/ReopenRequestCard'
 import { listContacts, projectByCodeFor, projectEvents } from '@/lib/data/projects'
 import { listReports } from '@/lib/data/reports'
 import { overallStatusLabels, paymentStatusLabels } from '@/lib/labels'
@@ -61,6 +63,7 @@ export default async function ProjectPage({ params: paramsPromise, searchParams:
   // Closing the project comes after the client has opened every report they can read.
   const unlockedReports = reports.filter((r) => r.client_unlocked)
   const reportsRead = unlockedReports.length > 0 && unlockedReports.every((r) => r.client_viewed_at)
+  const reopenRequest = p.stage === 'closed' ? await openReopenRequest(p.id) : null
   const openVisit = inspections.some((i) => ['scheduled', 'in_progress', 'submitted'].includes(i.status))
   if (tab === 'messages') await markRead({ projectId: p.id }, user.id)
   const visibleInspections = inspections.filter((i) => i.status !== 'cancelled')
@@ -249,6 +252,7 @@ export default async function ProjectPage({ params: paramsPromise, searchParams:
             )}
           </div>
           <div className="space-y-6">
+            <ReopenRequestCard projectId={p.id} stage={p.stage} pending={reopenRequest} tz={tz} />
             <section className="panel panel-pad space-y-3">
               <h2 className="text-lg">Help & follow-up</h2>
               <Link className="btn btn-secondary w-full" href={href('messages')}>Message your analyst</Link>
