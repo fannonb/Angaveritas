@@ -31,6 +31,7 @@ async function fill(page, values) {
   }
 }
 async function submit(page, label) {
+  await page.waitForLoadState('networkidle')
   const response = page.waitForResponse(r => r.request().method() === 'POST' && r.url().startsWith(origin))
   await page.getByRole('button', { name: label, exact: true }).click()
   assert.ok((await response).status() < 400, `POST ${label} must succeed`)
@@ -53,8 +54,9 @@ try {
     values ('admin@accounts.test.invalid','Account Admin','admin',${stored},now()) returning id`
   server = spawn(process.execPath, ['node_modules/next/dist/bin/next', process.env.BRIEF_TEST_PRODUCTION === '1' ? 'start' : 'dev', '-p', String(port)], {
     windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, DATABASE_URL: url.toString(), NEXT_DIST_DIR: '.next-accounts', APP_URL: origin,
+    env: { ...process.env, DATABASE_URL: url.toString(), NEXT_DIST_DIR: '.next-briefs', APP_URL: origin,
       STORAGE_DRIVER: 'local', STORAGE_DIR: path.join(results, 'storage'), RESEND_API_KEY: '', NOTIFY_EMAIL: 'team@accounts.test.invalid',
+      PAYSTACK_SECRET_KEY: '', PAYSTACK_PUBLIC_KEY: '',
       WORKER_SECRET: '', WORKER_USER_ID: '', IP_HASH_SALT: 'isolated-account-test' },
   })
   const record = d => { log += d.toString(); fs.writeFileSync(path.join(results, 'server.log'), log) }
@@ -103,20 +105,27 @@ try {
     const href=origin+`/portal/projects/${project.code}?tab=onboarding`
     await client.goto(href)
     await client.getByRole('link',{name:p.tab,exact:true}).waitFor()
-    await client.getByRole('button',{name:'Continue',exact:true}).click()
+    assert.equal(await client.getByRole('button',{name:'Step 2: What to check (locked)',exact:true}).isDisabled(),true)
+    assert.equal(await client.getByRole('button',{name:'Step 3: Review & send (locked)',exact:true}).isDisabled(),true)
+    await client.getByRole('button',{name:'Save and continue',exact:true}).click()
     await client.getByRole('alert').filter({hasText:'Please check'}).waitFor()
-    await submit(client,'Save')
-    await status(client,'Saved')
+    await submit(client,'Save draft')
+    await status(client,'Draft saved')
     const [draft]=await db`select service_brief,onboarding_submitted_at from projects where id=${project.id}`
     assert.equal(draft.onboarding_submitted_at,null)
     await answers(p.identity)
     if(p.location) await fill(client,{locationLabel:p.location})
-    await submit(client,'Save');await status(client,'Saved')
+    await submit(client,'Save draft');await status(client,'Draft saved')
     await client.reload()
     for(const [key,value] of Object.entries(p.identity)) assert.equal(await client.locator(`[name="service.${key}"]`).inputValue(),value)
-    await client.getByRole('button',{name:'Continue',exact:true}).click()
+    await submit(client,'Save and continue')
+    await client.locator('fieldset[data-step="1"]').waitFor({state:'visible'})
+    assert.equal((await db`select stage from projects where id=${project.id}`)[0].stage,'onboarding')
+    assert.equal(await client.getByRole('button',{name:'Step 3: Review & send (locked)',exact:true}).isDisabled(),true)
+    const [sectionSaved]=await db`select service_brief from projects where id=${project.id}`
+    for(const [key,value] of Object.entries(p.identity))assert.equal(sectionSaved.service_brief.answers[key],value)
     await answers(p.scope)
-    await client.getByRole('button',{name:'Continue',exact:true}).click()
+    await submit(client,'Save and continue')
     await client.getByRole('heading',{name:`Review your ${p.tab.toLowerCase()}`,exact:true}).waitFor()
     const send=p.code==='ground_verification'?'Send site details':`Send ${p.tab.toLowerCase()}`
     await client.getByRole('button',{name:send,exact:true}).click()
@@ -127,15 +136,15 @@ try {
       await client.getByRole('button',{name:'Back',exact:true}).click()
       await client.locator('[name="service.supplier_name"]').fill('')
       await client.locator('[name="service.supplier_name"]').evaluate(e=>e.required=false)
-      await client.getByRole('button',{name:'Continue',exact:true}).click()
-      await client.getByRole('button',{name:'Continue',exact:true}).click()
-      await submit(client,send)
+      await submit(client,'Save and continue')
       await client.getByRole('alert').filter({hasText:'Please complete'}).waitFor()
       assert.equal((await db`select stage from projects where id=${project.id}`)[0].stage,'onboarding')
       assert.equal(await client.locator('[name="service.supply_scope"]').inputValue(),p.identity.supply_scope)
       await client.locator('[name="service.supplier_name"]').fill(p.identity.supplier_name)
-      await client.getByRole('button',{name:'Continue',exact:true}).click()
-      await client.getByRole('button',{name:'Continue',exact:true}).click()
+      await submit(client,'Save and continue')
+      await client.locator('fieldset[data-step="1"]').waitFor({state:'visible'})
+      await submit(client,'Save and continue')
+      await client.getByRole('heading',{name:`Review your ${p.tab.toLowerCase()}`,exact:true}).waitFor()
       await client.locator('form').filter({has:client.locator('[name="projectId"]')}).first().evaluate(form=>{const input=document.createElement('input');input.name='service.financial_context';input.value='forged other service';form.appendChild(input)})
     }
     await submit(client,send)
@@ -168,6 +177,57 @@ try {
       assert.ok(!html.includes('PRIVATE_BUDGET_CONTEXT'))
       await page.locator('dd').filter({hasText:Object.values(p.identity)[0]}).first().waitFor()
     }
+  })
+  await check('invoice discount after deposit updates totals, client instructions, PDF and refund actions',async()=>{
+    const [p]=await db`select id,code from projects where service_code='ground_verification'`
+    const [invoice]=await db`insert into invoices(project_id,label,amount_kes,deposit_kes,created_by,line_items) values (${p.id},'Approved verification',10000,6000,${adminUser.id},${db.json([{label:'Approved verification',amount:10000}])}) returning id`
+    await db`insert into payments(invoice_id,amount_kes,kind,reference,note,recorded_by) values (${invoice.id},6000,'payment','verified-browser-deposit','Verified funds',${adminUser.id})`
+    await db`update projects set payment_status='deposit_received',payment_status_set_at=now(),lead_analyst_id=${adminUser.id} where id=${p.id}`
+    await client.goto(origin+`/portal/projects/${p.code}`)
+    await client.getByRole('heading',{name:'Getting ready for your visit',exact:true}).waitFor()
+    await client.getByText('Received. Thank you.',{exact:true}).waitFor()
+    assert.equal(await client.getByRole('link',{name:'Pay deposit',exact:true}).count(),0)
+    assert.equal(await client.getByRole('link',{name:'Ask analyst',exact:true}).count(),0)
+    await admin.goto(origin+`/staff/projects/${p.code}?tab=operations`)
+    await admin.getByRole('link',{name:'Edit invoice / discount',exact:true}).click()
+    await admin.waitForLoadState('networkidle')
+    await admin.getByRole('button',{name:'Add discount',exact:true}).click()
+    await admin.waitForFunction(()=>document.querySelectorAll('[name="lineAmount"]').length===2)
+    await admin.locator('[name="lineAmount"]').nth(1).fill('-2000')
+    assert.deepEqual(await admin.locator('[name="lineAmount"]').evaluateAll(inputs=>inputs.map(i=>i.value)),['10000','-2000'])
+    await admin.locator('[name="lineAmount"]').nth(1).fill('-12000')
+    await admin.locator('[name="reason"]').fill('Invalid discount used for validation')
+    await submit(admin,'Save invoice changes')
+    await admin.getByRole('alert').filter({hasText:'above zero'}).waitFor()
+    assert.equal(await admin.locator('[name="lineAmount"]').nth(1).inputValue(),'-12000')
+    await admin.locator('[name="lineAmount"]').nth(1).fill('-2000')
+    await admin.locator('[name="reason"]').fill('Loyalty discount agreed after work began')
+    await submit(admin,'Save invoice changes')
+    await status(admin,'Saved')
+    assert.equal((await db`select amount_kes from invoices where id=${invoice.id}`)[0].amount_kes,8000)
+    assert.equal((await db`select count(*)::int n from payments where invoice_id=${invoice.id}`)[0].n,1)
+    await client.goto(origin+`/portal/projects/${p.code}/invoices/${invoice.id}`)
+    await client.getByText('Revision 2: Loyalty discount agreed after work began',{exact:true}).waitFor()
+    assert.equal(await client.getByRole('button',{name:'Save invoice changes'}).count(),0)
+    const pdf=await client.request.get(origin+`/api/invoices/${invoice.id}/pdf?download`)
+    assert.equal(pdf.status(),200);assert.equal((await pdf.body()).subarray(0,5).toString(),'%PDF-')
+    for(const width of [390,1440]){
+      await admin.setViewportSize({width,height:1000})
+      await admin.goto(origin+`/staff/projects/${p.code}/invoices/${invoice.id}?edit=1`)
+      assert.ok(await admin.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),`Invoice editor fits ${width}px`)
+      await admin.screenshot({path:path.join(results,`invoice-editor-${width}.png`),fullPage:true})
+    }
+    await admin.locator('[name="lineAmount"]').last().fill('-6000')
+    await admin.locator('[name="reason"]').fill('Further discount agreed with client')
+    await submit(admin,'Save invoice changes');await status(admin,'Saved')
+    await client.reload()
+    await client.getByText('Overpaid · refund to arrange',{exact:true}).waitFor()
+    await admin.goto(origin+'/staff')
+    await admin.getByRole('link',{name:/Arrange refund of KES 2000/}).waitFor()
+    await admin.screenshot({path:path.join(results,'admin-next-actions.png'),fullPage:true})
+    await admin.getByRole('link',{name:/Arrange refund of KES 2000/}).click()
+    assert.equal(await admin.locator('select[name="kind"]').inputValue(),'refund')
+    assert.equal(await admin.locator('select[name="invoiceId"]').inputValue(),invoice.id)
   })
   assert.deepEqual(errors,[],'No client exceptions')
 } catch (error) {

@@ -1,12 +1,13 @@
 'use server'
 
+import { createCase } from '@/lib/data/engagements'
 import { revalidatePath } from 'next/cache'
 import { redirect } from 'next/navigation'
 import { logEvent, notifyTeam, notifyUser } from '@/lib/activity'
 import { hashPassword, passwordProblem, verifyPassword } from '@/lib/auth/password'
 import { destroyAllSessions, requestIpHash, requireClient } from '@/lib/auth/session'
+import { inKenya } from '@/lib/coordinates'
 import { sql } from '@/lib/db'
-import { markNotificationsRead } from '@/lib/data/misc'
 import { postMessage } from '@/lib/data/messages'
 import { addContact, projectFor, removeContact, saveOnboarding, submitOnboarding } from '@/lib/data/projects'
 import { acceptProposal, declineProposal, getProposal } from '@/lib/data/proposals'
@@ -17,7 +18,7 @@ import { getRequestById, setRequestStatus } from '@/lib/data/requests'
 import { getUserById, setPassword, updateProfile } from '@/lib/data/users'
 import { accountLocationSchema, accountPhoneSchema, formText, whatsappSchema } from '@/lib/validation'
 
-export type ActionState = { error?: string; ok?: boolean; message?: string; field?: string } | null
+export type ActionState = { error?: string; ok?: boolean; message?: string; field?: string; nextStep?: number } | null
 
 // ---------- Proposals (stage 3) ----------
 
@@ -151,17 +152,28 @@ export async function saveOnboardingAction(_: ActionState, form: FormData): Prom
   if (!['onboarding', 'planning'].includes(project.stage)) return { error: 'The brief is locked now that fieldwork has started. Message your analyst about any change.' }
   const profile = briefProfile(project)
   const final = form.get('intent') === '1'
-  const checked = validateServiceBrief(profile, Object.fromEntries(profile.fields.map(f => [f.key, form.get(`service.${f.key}`)])), final)
+  const continuing = form.get('intent') === 'continue'
+  const section = Number(form.get('section'))
+  if (continuing && section !== 0 && section !== 1) return {error:'Please complete the current section first.'}
+  const alreadySubmitted = !!project.onboarding_submitted_at && !!project.data_consent_at
+  const checked = validateServiceBrief(profile, Object.fromEntries(profile.fields.map(f => [f.key, form.get(`service.${f.key}`)])), final || continuing || alreadySubmitted, continuing && !alreadySubmitted ? section as 0 | 1 : 1)
   if (checked.error) return { error: checked.error, field: `service.${checked.field}` }
   const title = formText(form, 'title', 140)
   if (!title || title.length < 3) return { error: 'Please give the project a name.' }
   if (form.get('intent') === '1' && form.get('consent') !== 'on') return {error:'Please confirm consent to process the project information.'}
-  if (final && !formText(form,'locationLabel') && (profile.code === 'feasibility' || (profile.physicalLocation && !formText(form,'siteDirections')))) return {error:`Please provide ${profile.location.toLowerCase()}.`, field:'locationLabel'}
+  if ((final || continuing || alreadySubmitted) && !formText(form,'locationLabel') && (profile.code === 'feasibility' || (profile.physicalLocation && !formText(form,'siteDirections')))) return {error:`Please provide ${profile.location.toLowerCase()}.`, field:'locationLabel'}
   const rawValue = String(form.get('investmentValue') ?? '').replace(/[^\d]/g, '')
+  // Map pin: kept only inside Kenya. Leaving both fields out keeps the stored pin.
+  const pinSent = form.has('locationLat') || form.has('locationLng')
+  const rawLat = String(form.get('locationLat') ?? '').trim()
+  const rawLng = String(form.get('locationLng') ?? '').trim()
+  const pin = rawLat && rawLng && inKenya(Number(rawLat), Number(rawLng)) ? { lat: Number(rawLat), lng: Number(rawLng) } : null
   await saveOnboarding(project.id, user.id, {
     title,
     locationLabel: formText(form, 'locationLabel', 200),
     county: formText(form, 'county', 80),
+    locationLat: pinSent ? (pin?.lat ?? null) : undefined,
+    locationLng: pinSent ? (pin?.lng ?? null) : undefined,
     siteDirections: formText(form, 'siteDirections'),
     siteAccessNotes: formText(form, 'siteAccessNotes'),
     claims: formText(form, 'claims'),
@@ -170,6 +182,8 @@ export async function saveOnboardingAction(_: ActionState, form: FormData): Prom
     serviceBrief: checked.brief,
   })
   revalidatePath(`/portal/projects/${project.code}`)
+  revalidatePath('/portal')
+  if (continuing) return {ok:true,message:section === 0 ? 'Details saved. Next, tell us what to check.' : 'Your answers are saved. Review them and give consent before sending.',nextStep:section+1}
   if (form.get('intent') === '1') {
     if (form.get('consent') !== 'on') return { error: 'Please confirm consent to process the project information.' }
     const submitted = await submitOnboarding(project.id, user.id)
@@ -184,7 +198,7 @@ export async function saveOnboardingAction(_: ActionState, form: FormData): Prom
     }
     redirect(`/portal/projects/${project.code}?onboarded=1`)
   }
-  return { ok: true, message: 'Saved.' }
+  return { ok: true, message: project.onboarding_submitted_at && project.data_consent_at ? 'Changes saved. Your analyst can see the updated brief.' : 'Draft saved. Continue when ready, then use Review & send to submit your brief.' }
 }
 
 export async function addContactAction(form: FormData) {
@@ -212,7 +226,7 @@ export async function recordReportViewAction(reportId: string) {
   if (!/^[0-9a-f-]{36}$/i.test(reportId)) return
   await sql`insert into report_reads(report_id,user_id)
     select r.id,${user.id} from reports r join projects p on p.id=r.project_id
-    where r.id=${reportId} and r.status='published' and p.client_id=${user.id}
+    where r.id=${reportId} and r.status='published' and p.client_id=${user.id} and work_order_unlocked(r.work_order_id)
     on conflict do nothing`
   revalidatePath('/portal')
   revalidatePath('/portal/projects')
@@ -226,6 +240,7 @@ export async function rateReportAction(form: FormData) {
   const feedback = formText(form, 'feedback', 2000)
   await rateReport(reportId, project.id, rating, feedback)
   await logEvent({ actorId: user.id, projectId: project.id, type: 'report.rated', summary: `Client rated the report ${rating}/5${feedback ? `: ${feedback}` : ''}` })
+  if (rating <= 3) await createCase(project.id,user.id,{kind:'complaint',detail:feedback&&feedback.length>=10?feedback:`Client rated the report ${rating}/5 and requested follow-up.`,reportId})
   if (rating <= 3) await notifyTeam({ title: `${project.code}: report rated ${rating}/5`, body: feedback ?? 'No comment.', href: `/staff/projects/${project.code}?tab=reports`, staffIds: [project.lead_analyst_id] })
   revalidatePath(`/portal/projects/${project.code}/reports/${reportId}`)
 }
@@ -265,10 +280,4 @@ export async function changePasswordAction(_: ActionState, form: FormData): Prom
   await destroyAllSessions(user.id, true)
   await logEvent({ actorId: user.id, type: 'account.password_changed', summary: 'Password changed', ipHash: await requestIpHash() })
   return { ok: true, message: 'Password changed. Other devices have been signed out.' }
-}
-
-export async function markAllReadAction() {
-  const user = await requireClient()
-  await markNotificationsRead(user.id)
-  revalidatePath('/portal', 'layout')
 }

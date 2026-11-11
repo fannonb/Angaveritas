@@ -3,6 +3,7 @@ import { getUser } from '@/lib/auth/session'
 import { getInspection } from '@/lib/data/inspections'
 import { projectFor } from '@/lib/data/projects'
 import { withActor } from '@/lib/db'
+import { visitStarted } from '@/lib/fieldwork'
 import { sameOrigin } from '@/lib/request'
 import { fieldCollectionProblem } from '@/lib/workflow'
 const schema=z.object({inspectionId:z.string().uuid(),notes:z.string().max(20000),revision:z.string().datetime()})
@@ -22,9 +23,14 @@ export async function POST(req:Request) {
     const [current]=await tx`select updated_at,status from inspections where id=${insp.id} for update`
     // PostgreSQL timestamps have microseconds; compare the millisecond revision shown to the browser.
     if(!['scheduled','in_progress'].includes(current.status) || new Date(current.updated_at).toISOString() !== parsed.data.revision) return null
-    const [updated]=await tx`update inspections set field_notes=${parsed.data.notes},field_notes_by=${user.id} where id=${insp.id} returning updated_at`
-    return updated
+    // The first note starts the visit, in the same update so the returned revision stays current.
+    const [updated]=await tx`update inspections set field_notes=${parsed.data.notes},field_notes_by=${user.id},
+      status=case when status='scheduled' then 'in_progress'::inspection_status else status end,
+      started_at=case when status='scheduled' then coalesce(started_at,now()) else started_at end
+      where id=${insp.id} returning updated_at`
+    return updated ? {updatedAt:updated.updated_at as Date,started:current.status==='scheduled'} : null
   })
   if(!row) return Response.json({error:'The inspection changed since this draft was loaded. Copy your draft and reload to reconcile it.'},{status:409})
-  return Response.json({revision:new Date(row.updated_at).toISOString()})
+  if(row.started) await visitStarted(insp,access.project,user.id)
+  return Response.json({revision:new Date(row.updatedAt).toISOString()})
 }

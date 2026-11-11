@@ -1,3 +1,4 @@
+import { standardPaymentTerms } from '@/lib/billing'
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { RequestChip, Timeline } from '@/components/app/bits'
@@ -44,7 +45,7 @@ function defaultsFromRequest(r: RequestWithClient): ProposalDefaults {
     exclusions: 'Legal title searches, cadastral surveys, structural engineering opinions and financial audits are outside this scope. We will tell you if you need one.',
     timeline: b ? `${b.urgency.name}: report within ${b.urgency.delivery} of the site visit` : 'Report within 5–10 business days of the site visit',
     lineItems: items,
-    paymentTerms: 'Payment in full before the site visit is scheduled, by M-Pesa or bank transfer. Payment details are on the invoice we send after you accept.',
+    paymentTerms: standardPaymentTerms,
     validUntil: valid,
     ndaOffered: true,
   }

@@ -1,3 +1,4 @@
+import { requiredDeposit } from '@/lib/billing'
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { RequestChip, Timeline } from '@/components/app/bits'
@@ -60,7 +61,7 @@ export default async function RequestPage({ params: paramsPromise, searchParams:
             <p className="decision__label">Your proposal is ready</p>
             <h2 id="decision-title" className="decision__total">{kes(proposal.total_kes)}</h2>
             <dl className="decision__facts">
-              <div><dt>Due before the site visit</dt><dd>{kes(proposal.deposit_kes ?? proposal.total_kes)}</dd></div>
+              <div><dt>Due before the site visit</dt><dd>{kes(proposal.deposit_kes ?? requiredDeposit(proposal.total_kes))}</dd></div>
               {proposal.valid_until && <div><dt>Valid until</dt><dd>{fmtDate(proposal.valid_until, user.timezone)}</dd></div>}
               <div><dt>Charged</dt><dd>Only after you accept</dd></div>
             </dl>

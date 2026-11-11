@@ -75,6 +75,10 @@ export async function invoicePdf(inv: InvoiceDoc): Promise<Uint8Array> {
   }
   y -= 12
 
+  if (inv.revision > 1) {
+    for (const l of wrap(`Revision ${inv.revision}: ${inv.revisionReason ?? ''}`, regular, 9, W - 2 * M)) { ensure(14); text(l, M, y, { color: C.ink2 }); y -= 13 }
+    y -= 8
+  }
   // Key facts
   const facts: [string, string][] = [
     ['Invoice number', inv.code],
@@ -126,6 +130,7 @@ export async function invoicePdf(inv: InvoiceDoc): Promise<Uint8Array> {
   if (inv.status === 'cancelled') totalRow('Amount due', 'Cancelled', { strong: true, color: C.bad })
   else {
     totalRow('Balance due', money(inv.balanceKes), { strong: true, color: inv.balanceKes ? C.ink : C.ok })
+    if (inv.creditKes > 0) totalRow('Overpaid / refund to arrange', money(inv.creditKes), { color: C.gold })
     if (inv.depositDueKes > 0 && inv.depositDueKes < inv.balanceKes) totalRow('Due now (deposit)', money(inv.depositDueKes), { color: C.gold })
   }
   y -= 10
@@ -133,6 +138,7 @@ export async function invoicePdf(inv: InvoiceDoc): Promise<Uint8Array> {
   // Payment schedule in plain words
   const terms = inv.status === 'cancelled'
     ? `This invoice was cancelled${inv.cancelledAt ? ` on ${date(inv.cancelledAt)}` : ''}${inv.cancelReason ? `: ${inv.cancelReason}` : ''}. Nothing is owed on it.`
+    : inv.creditKes > 0 ? `Nothing further to pay. You have overpaid by ${money(inv.creditKes)} after this adjustment. Your analyst will arrange a refund.`
     : inv.balanceKes === 0 ? 'Paid in full. Thank you.'
     : inv.depositDueKes > 0 && inv.depositKes < inv.amountKes
       ? `A deposit of ${money(inv.depositKes)} is due before we schedule the site visit. The balance of ${money(inv.amountKes - inv.depositKes)} is due${inv.dueOn ? ` by ${date(inv.dueOn)}` : ' as agreed in your proposal'}.`

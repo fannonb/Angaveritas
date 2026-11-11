@@ -1,6 +1,7 @@
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import InvoiceDocument from '@/components/app/InvoiceDocument'
+import InvoiceEditor from '@/components/app/InvoiceEditor'
 import PrintButton from '@/components/app/PrintButton'
 import { fmtDateTime } from '@/components/app/format'
 import { staffOperationsAction } from '@/app/staff/operations-actions'
@@ -11,7 +12,7 @@ import { projectByCodeFor } from '@/lib/data/projects'
 export const metadata = { title: 'Invoice' }
 
 // What the client receives, before or after sending it: the same sheet as the emailed PDF.
-export default async function StaffInvoicePage({ params: paramsPromise, searchParams: searchPromise }: { params: Promise<{ code: string; id: string }>; searchParams: Promise<{ saved?: string; error?: string }> }) {
+export default async function StaffInvoicePage({ params: paramsPromise, searchParams: searchPromise }: { params: Promise<{ code: string; id: string }>; searchParams: Promise<{ saved?: string; error?: string; edit?: string }> }) {
   const [{ code, id }, query] = await Promise.all([paramsPromise, searchPromise])
   const user = await requireStaff(['analyst', 'admin'])
   const access = await projectByCodeFor(user, code)
@@ -48,10 +49,11 @@ export default async function StaffInvoicePage({ params: paramsPromise, searchPa
           )}
         </div>
       </div>
-      {query.saved && <p role="status" className="alert alert-ok mx-auto max-w-[820px] no-print">Done. The client has the latest copy.</p>}
+      {query.saved && <p role="status" className="alert alert-ok mx-auto max-w-[820px] no-print">Saved. The latest invoice is available in the client portal. Use “Email to client” to send a PDF copy.</p>}
       {query.error && <p role="alert" className="alert alert-bad mx-auto max-w-[820px] no-print">{query.error}</p>}
 
       <InvoiceDocument inv={inv} />
+      {inv.status === 'issued' && user.role === 'admin' && <InvoiceEditor initiallyOpen={query.edit === '1'} key={inv.revision} invoice={{id:inv.id,projectId:access.project.id,returnTo:here,revision:inv.revision,label:inv.label,lines:inv.lines,amount:inv.amountKes,approvedAmount:inv.approvedAmountKes,paid:inv.paidKes,dueOn:inv.dueOn}} />}
 
       {inv.status === 'issued' && inv.payments.length === 0 && (
         <details className="panel panel-pad mx-auto max-w-[820px] no-print">

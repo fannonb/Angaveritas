@@ -117,9 +117,31 @@ describe.skipIf(process.env.RUN_DATABASE_TESTS !== '1')('Paystack database recon
     expect(await reconcilePaystackTransaction(a.reference)).toBe('failed')
     expect((await state.sql`select * from payments where invoice_id=${i.id}`)).toHaveLength(0)
     transactions.get(a.reference)!.status='success'
+    const teamNotices=async () => (await state.sql`select 1 from notifications where user_id=${admin} and title like '%payment received, KES%'`).length
+    const before=await teamNotices()
     const id=await event({event:'charge.success',data:{reference:a.reference}})
     await Promise.all([processPaystackEvent(id),processPaystackEvent(id)])
     expect((await state.sql`select * from payments where invoice_id=${i.id}`)).toHaveLength(1)
+    expect(await teamNotices()).toBe(before+1) // the team hears about checkout payments once, like manual references
+  })
+  it('keeps an unfinished checkout open for 30 minutes, then tells the client once that it did not go through',async () => {
+    const i=await invoice(),a=await start(i.id)
+    const notices=async () => (await state.sql`select n.title from notifications n where n.title like 'Payment not completed%' and n.body like ${'%'+a.reference+'%'}`).length
+    transactions.get(a.reference)!.status='abandoned'
+    expect(await reconcilePaystackTransaction(a.reference)).toBe('pending')
+    expect(await notices()).toBe(0)
+    await state.sql`update paystack_attempts set created_at=now()-interval '31 minutes' where reference=${a.reference}`
+    expect(await reconcilePaystackTransaction(a.reference)).toBe('abandoned')
+    expect(await reconcilePaystackTransaction(a.reference)).toBe('abandoned')
+    expect(await notices()).toBe(1)
+    const b=await start(i.id)
+    expect(b.reference).not.toBe(a.reference)
+  })
+  it('tells the client straight away when a payment fails',async () => {
+    const i=await invoice(),a=await start(i.id)
+    transactions.get(a.reference)!.status='failed'
+    expect(await reconcilePaystackTransaction(a.reference)).toBe('failed')
+    expect((await state.sql`select 1 from notifications n where n.title like 'Payment not completed%' and n.body like ${'%'+a.reference+'%'}`).length).toBe(1)
   })
   it('blocks checkout on review exceptions until an admin records an audited resolution',async () => {
     const i=await invoice(),a=await start(i.id)

@@ -1,12 +1,14 @@
+import EngagementPanel from '@/components/app/EngagementPanel'
 import { briefProfile, briefStageLabels, suggestedChecks } from '@/lib/service-briefs'
 import ServiceBriefSummary from '@/components/app/ServiceBriefSummary'
 import OperationsPanel from '@/components/app/OperationsPanel'
 import { sql } from '@/lib/db'
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
-import { HealthChip, InspectionChip, ReportChip, StageChip, StageTracker, Tabs, Timeline } from '@/components/app/bits'
+import { ArrivalFields, HealthChip, InspectionChip, ProjectProgress, ReportChip, StageTracker, Tabs, Timeline } from '@/components/app/bits'
 import EvidenceGallery, { DocumentList } from '@/components/app/EvidenceGallery'
-import { fmtDate, fmtDateTime, kes } from '@/components/app/format'
+import { fmtDate, fmtDateTime, fmtVisit, kes } from '@/components/app/format'
+import { AppIcon } from '@/components/app/icons'
 import Messages from '@/components/app/Messages'
 import Uploader from '@/components/app/Uploader'
 import VisitReadiness from '@/components/app/VisitReadiness'
@@ -19,7 +21,7 @@ import { unpaidInvoices } from '@/lib/data/operations'
 import { listReports } from '@/lib/data/reports'
 import { listAssignableStaff } from '@/lib/data/users'
 import { paymentStatusLabels } from '@/lib/labels'
-import { staffNextStep } from '@/lib/workflow'
+import { projectProgress, staffNextStep } from '@/lib/workflow'
 import { createInspectionAction, createReportAction, staffAddContactAction, staffMessageAction, staffRemoveContactAction } from '../../actions'
 import FileControls from '../../FileControls'
 import ManageForm from './ManageForm'
@@ -63,7 +65,7 @@ export default async function StaffProject({ params: paramsPromise, searchParams
   if (tab === 'messages') await markRead({ projectId: p.id }, user.id)
   const flagged = evidence.filter((e) => e.integrity_flag && !e.visible_to_client).length
   const href = (t: Tab) => `/staff/projects/${p.code}?tab=${t}`
-  const next = access.canManage ? staffNextStep(p, inspections, reports, flagged, unpaid.reduce((s, u) => s + u.unpaid_kes, 0)) : null
+  const next = access.canManage ? staffNextStep(p, inspections.filter(i=>i.work_order_id===p.active_work_order_id), reports.filter(r=>r.work_order_id===p.active_work_order_id), flagged, unpaid.reduce((s, u) => s + u.unpaid_kes, 0)) : null
   const labels: Record<Tab, string> = {
     overview: 'Overview',
     site: `${profile.tab} & files`,
@@ -75,6 +77,35 @@ export default async function StaffProject({ params: paramsPromise, searchParams
     operations: 'Billing',
     agreement:'Agreement', monitoring:'Monitoring', settings:'Service & privacy', alerts:'Risk alerts',
   }
+  const more: Tab[] = ['agreement', 'monitoring', 'alerts', 'settings']
+  const hasLiveVisit = inspections.some((i) => i.work_order_id===p.active_work_order_id && i.status !== 'cancelled')
+  const openVisits = inspections.filter((i) => ['scheduled', 'in_progress', 'submitted'].includes(i.status))
+  // Until the first visit is booked, the visit is scheduled from the overview, right under the next step that asks for it.
+  const planHere = access.canManage && next?.tab === 'inspections' && !hasLiveVisit
+  // One analyst doing both roles needs an admin to review their visit and approve their report. An admin doing both just publishes.
+  const sameTeam = !!p.lead_analyst_id && p.lead_analyst_id === p.field_agent_id && staff.find((s) => s.id === p.lead_analyst_id)?.role !== 'admin'
+  const planForm = access.canManage && (
+    <>
+      <form action={createInspectionAction} className="mt-3 grid gap-3 md:grid-cols-2 md:items-end">
+        <input type="hidden" name="projectId" value={p.id} />
+        <label className="label">Title<input className="input" name="title" defaultValue={inspections.length ? `Follow-up visit ${inspections.length + 1}` : profile.activity} maxLength={200} /></label>
+        <label className="label">Date<input className="input" type="date" name="scheduledFor" required /></label>
+        <label className="label">
+          Field agent
+          <select className="input" name="agentId" defaultValue={p.field_agent_id ?? ''}>
+            <option value="">Project agent</option>
+            {staff.map((s) => <option key={s.id} value={s.id}>{s.full_name}</option>)}
+          </select>
+        </label>
+        <label className="label">Site<select className="input" name="siteId"><option value="">Primary project location</option>{sites.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}</select></label>
+        <div className="md:col-span-2"><ArrivalFields /></div>
+        <label className="label">Report due <span className="opt">(client sees this)</span><input className="input" type="date" name="dueDate" defaultValue={p.due_date ? String(p.due_date).slice(0, 10) : ''} /></label>
+        <label className="label md:col-span-full">Checks for the field agent <span className="opt">(one per line)</span><textarea className="input" name="objectives" defaultValue={suggestedChecks(profile,p.claims)} maxLength={8000} /></label>
+        <button className="btn btn-primary justify-self-start whitespace-nowrap" type="submit">Schedule and notify client</button>
+      </form>
+      <p className="hint mt-2">Suggested from the client&apos;s brief: check them against the accepted scope. The client is emailed the date and arrival time; the field agent gets the checklist.</p>
+    </>
+  )
 
   return (
     <div className="space-y-5">
@@ -105,11 +136,10 @@ export default async function StaffProject({ params: paramsPromise, searchParams
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <HealthChip health={p.health} />
-          <StageChip stage={p.stage} label={journeyLabels[p.stage]} />
           {access.canManage && <span className="chip chip--plain chip--none">{paymentStatusLabels[p.payment_status]}</span>}
         </div>
       </div>
-      <section className="panel panel-pad"><StageTracker stage={p.stage} retainer={p.engagement === 'retainer'} labels={journeyLabels} /></section>
+      <section className="panel panel-pad">{access.canManage ? <ProjectProgress steps={projectProgress(p, inspections.filter(i=>i.work_order_id===p.active_work_order_id), reports.filter(r=>r.work_order_id===p.active_work_order_id), unpaid.reduce((s, u) => s + u.unpaid_kes, 0), (d) => fmtDate(d))} viewer="staff" /> : <StageTracker stage={p.stage} retainer={p.engagement === 'retainer'} labels={journeyLabels} />}</section>
       {next && (
         <section className="next-step" aria-label="Next step">
           <div>
@@ -117,36 +147,85 @@ export default async function StaffProject({ params: paramsPromise, searchParams
             <p className="next-step__title">{next.title}</p>
             <p className="next-step__text">{next.text}</p>
           </div>
-          {next.tab !== tab && <Link className="btn btn-primary btn-small" href={href(next.tab)}>Go to {labels[next.tab].replace(/ \(.*\)$/, '')}</Link>}
+          {next.tab !== tab && !(planHere && tab === 'overview') && <Link className="btn btn-primary btn-small" href={href(next.tab)}>Go to {labels[next.tab].replace(/ \(.*\)$/, '')}</Link>}
         </section>
       )}
       {!access.canManage && flagged > 0 && <p className="alert alert-warn">{flagged} evidence item{flagged > 1 ? 's' : ''} failed the automatic integrity check and {flagged > 1 ? 'are' : 'is'} held back from the client. <Link href={href('evidence')}>Check evidence</Link></p>}
 
-      <Tabs active={tab} tabs={allowed.filter(t => !['agreement','monitoring','settings','alerts'].includes(t)).map((t) => ({ key: t, label: labels[t], href: href(t) }))} />
-      {access.canManage && <div className="flex flex-wrap gap-4 text-sm">{(['agreement','monitoring','alerts','settings'] as Tab[]).map(t => <Link key={t} href={href(t)}>{labels[t]}</Link>)}</div>}
+      <div className="flex flex-wrap items-center gap-2">
+        <Tabs active={tab} tabs={allowed.filter(t => !more.includes(t)).map((t) => ({ key: t, label: labels[t], href: href(t) }))} />
+        {/* Rarely needed project settings sit behind one menu instead of a second row of links. */}
+        {access.canManage && (
+          <details className="relative">
+            <summary className={`btn btn-secondary btn-small list-none ${more.includes(tab) ? 'border-ink' : ''}`}>{more.includes(tab) ? labels[tab] : 'More'} ▾</summary>
+            <ul className="absolute right-0 z-20 mt-2 w-52 rounded-lg border border-line bg-white py-1 shadow-lg">
+              {more.map((t) => <li key={t}><Link href={href(t)} aria-current={tab === t ? 'page' : undefined} className={`block px-4 py-2 text-sm no-underline hover:bg-paper ${tab === t ? 'font-semibold text-ink' : 'text-ink-2'}`}>{labels[t]}</Link></li>)}
+            </ul>
+          </details>
+        )}
+      </div>
 
+      {access.canManage && (tab === 'overview' || tab === 'settings') && <EngagementPanel projectId={p.id} manager admin={user.role==='admin'} />}
       {tab === 'overview' && (
         <div className="grid gap-6 xl:grid-cols-[1.5fr_1fr] xl:items-start">
           <div className="space-y-6">
             {access.canManage && !['delivered','monitoring','closed'].includes(p.stage) && (
               <VisitReadiness project={p} staff />
             )}
-            {access.canManage && (
-              <section className="panel panel-pad" id="team">
-                <h2 className="text-lg">Assigned team</h2>
-                <p className="hint mt-1">The lead analyst prepares the scope and report. The field agent executes site verification.</p>
-                <div className="mt-3">
-                  <TeamForm projectId={p.id} leadAnalystId={p.lead_analyst_id} fieldAgentId={p.field_agent_id} staff={staff} />
-                </div>
+            {planHere && (
+              <section className="panel panel-pad" id="plan-visit">
+                <h2 className="text-lg">Schedule the {profile.activity.toLowerCase()}</h2>
+                {planForm}
               </section>
             )}
-            <section className="panel panel-pad">
-              <h2 className="text-lg">Project details & planning</h2>
-              <div className="mt-4">
-                <ManageForm p={p} owedKes={unpaid.reduce((s, u) => s + u.unpaid_kes, 0)} />
+            {openVisits.length > 0 && (
+              <section className="panel" aria-labelledby="visit-card">
+                <div className="panel-head"><h2 id="visit-card">{openVisits.length === 1 ? 'Site visit' : 'Site visits'}</h2>{access.canManage && <Link href={href('inspections')} className="text-sm">Plan another visit</Link>}</div>
+                <ul className="divide-y divide-line">
+                  {openVisits.map((i) => (
+                    <li key={i.id}>
+                      <Link href={`/staff/inspections/${i.id}`} className="row-link flex-wrap gap-y-2 py-3.5">
+                        <span className={`tile ${i.status === 'submitted' ? 'tile--warn' : i.status === 'in_progress' ? 'tile--info' : ''}`}><AppIcon name="pin" /></span>
+                        <span className="min-w-0 flex-1 basis-56">
+                          <span className="row-link__title">{i.scheduled_for ? fmtVisit(i.scheduled_for, i.arrival_window) : 'Date not set'}</span>
+                          <span className="row-link__meta">{i.code} · {i.title} · {i.agent_name ?? 'No field agent'}</span>
+                        </span>
+                        <InspectionChip status={i.status} />
+                      </Link>
+                    </li>
+                  ))}
+                </ul>
+                <p className="border-t border-line px-6 py-3 text-sm text-ink-2">Report expected {p.due_date ? fmtDate(p.due_date) : <strong className="text-warn">date not set</strong>}. Change dates, arrival or the checklist on the visit.</p>
+              </section>
+            )}
+            {access.canManage && (
+              <section className="panel panel-pad" id="team">
+                <h2 className="text-lg">Team</h2>
+                {p.lead_analyst_id && p.field_agent_id ? (
+                  <>
+                    <dl className="kv mt-3"><dt>Lead analyst</dt><dd>{p.analyst_name}</dd><dt>Field agent</dt><dd>{p.agent_name}</dd></dl>
+                    {sameTeam && <p className="alert alert-warn mt-3">{p.analyst_name} is both lead analyst and field agent. An admin must review their visit and approve their report before the client sees them.</p>}
+                    <details className="mt-3">
+                      <summary className="cursor-pointer text-sm font-semibold">Change the team</summary>
+                      <div className="mt-3"><TeamForm projectId={p.id} leadAnalystId={p.lead_analyst_id} fieldAgentId={p.field_agent_id} staff={staff} /></div>
+                    </details>
+                  </>
+                ) : (
+                  <>
+                    <p className="hint mt-1">The lead analyst prepares the scope and report. The field agent carries out the site visit.</p>
+                    <div className="mt-3"><TeamForm projectId={p.id} leadAnalystId={p.lead_analyst_id} fieldAgentId={p.field_agent_id} staff={staff} /></div>
+                  </>
+                )}
+              </section>
+            )}
+            {/* Settings, not a step: name, health, report date, site and planning notes. */}
+            <details className="panel" open={!access.canManage}>
+              <summary className="panel-head cursor-pointer list-none"><h2>Project details</h2><span className="text-sm text-muted">Health, report date, site, planning notes</span></summary>
+              <div className="panel-pad">
+                <ManageForm p={p} admin={user.role === 'admin'} owedKes={unpaid.reduce((s, u) => s + u.unpaid_kes, 0)} />
               </div>
-            </section>
-            {p.stage === 'closed' && (
+            </details>
+            {p.stage === 'closed' && user.role === 'admin' && (
               <section className="panel panel-pad space-y-3">
                 <h2 className="text-lg">Reopen project</h2>
                 <p className="hint">The client sees it as open again, and their reports and messages stay as they are. Use this when the client needs more work from the team without a new follow-up project.</p>
@@ -247,27 +326,17 @@ export default async function StaffProject({ params: paramsPromise, searchParams
 
       {tab === 'inspections' && (
         <div className="space-y-6">
-          {access.canManage && (
+          {access.canManage && (hasLiveVisit ? (
+            <details className="panel">
+              <summary className="panel-head cursor-pointer list-none"><h2>Plan another visit</h2><span className="text-sm text-muted">Follow-up or extra site</span></summary>
+              <div className="panel-pad">{planForm}</div>
+            </details>
+          ) : (
             <section className="panel panel-pad">
               <h2 className="text-lg">Plan {profile.activity.toLowerCase()}</h2>
-              <form action={createInspectionAction} className="mt-3 grid gap-3 md:grid-cols-[1.5fr_1fr_1fr_auto] md:items-end">
-                <input type="hidden" name="projectId" value={p.id} />
-                <label className="label">Title<input className="input" name="title" defaultValue={inspections.length ? `Follow-up visit ${inspections.length + 1}` : profile.activity} maxLength={200} /></label>
-                <label className="label">Date<input className="input" type="date" name="scheduledFor" /></label>
-                <label className="label">
-                  Field agent
-                  <select className="input" name="agentId" defaultValue={p.field_agent_id ?? ''}>
-                    <option value="">Project agent</option>
-                    {staff.map((s) => <option key={s.id} value={s.id}>{s.full_name}</option>)}
-                  </select>
-                </label>
-                <label className="label">Site<select className="input" name="siteId"><option value="">Primary project location</option>{sites.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}</select></label>
-                <label className="label md:col-span-full">Proposed checks<textarea className="input" name="objectives" defaultValue={suggestedChecks(profile,p.claims)} maxLength={8000} /></label>
-                <button className="btn btn-primary" type="submit">Schedule</button>
-              </form>
-              <p className="hint mt-2">Review these suggested checks against the accepted scope and brief before scheduling. One check per line. Contact permissions still apply; the client is told the date.</p>
+              {planForm}
             </section>
-          )}
+          ))}
           <section className="panel">
             {inspections.length === 0 ? (
               <p className="empty">No inspections yet.</p>
@@ -278,7 +347,7 @@ export default async function StaffProject({ params: paramsPromise, searchParams
                     <Link href={`/staff/inspections/${i.id}`} className="flex flex-wrap items-center justify-between gap-3 px-6 py-4 text-ink no-underline hover:bg-paper">
                       <span>
                         <strong className="block">{i.title}</strong>
-                        <span className="text-sm text-ink-2">{i.code} · {i.scheduled_for ? fmtDate(i.scheduled_for) : 'date TBC'} · {i.agent_name ?? 'no agent'} · {i.finding_count} findings · {i.evidence_count} evidence</span>
+                        <span className="text-sm text-ink-2">{i.code} · {i.scheduled_for ? fmtVisit(i.scheduled_for, i.arrival_window) : <strong className="text-warn">Date not set</strong>} · {i.agent_name ?? 'no agent'} · {i.finding_count} findings · {i.evidence_count} evidence</span>
                       </span>
                       <InspectionChip status={i.status} />
                     </Link>
@@ -348,11 +417,11 @@ export default async function StaffProject({ params: paramsPromise, searchParams
         </div>
       )}
 
-      {tab === 'operations' && <OperationsPanel projectId={p.id} manager={true} section="billing" />}
-      {tab === 'agreement' && <OperationsPanel projectId={p.id} manager={true} section="agreement" />}
-      {tab === 'monitoring' && <OperationsPanel projectId={p.id} manager={true} section="monitoring" />}
-      {tab === 'settings' && <OperationsPanel projectId={p.id} manager={true} section="settings" />}
-      {tab === 'alerts' && <OperationsPanel projectId={p.id} manager={true} section="alerts" />}
+      {tab === 'operations' && <OperationsPanel projectId={p.id} manager={true} finance={user.role === 'admin'} section="billing" />}
+      {tab === 'agreement' && <OperationsPanel projectId={p.id} manager={true} finance={user.role === 'admin'} section="agreement" />}
+      {tab === 'monitoring' && <OperationsPanel projectId={p.id} manager={true} finance={user.role === 'admin'} section="monitoring" />}
+      {tab === 'settings' && <OperationsPanel projectId={p.id} manager={true} finance={user.role === 'admin'} section="settings" />}
+      {tab === 'alerts' && <OperationsPanel projectId={p.id} manager={true} finance={user.role === 'admin'} section="alerts" />}
 
       {tab === 'messages' && (
         <section className="panel panel-pad">

@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { getUser } from '@/lib/auth/session'
 import { allowedMime, createPendingFile, macroCapableMime, openUploadsBy, scanningEnabled } from '@/lib/data/files'
 import { getInspection } from '@/lib/data/inspections'
+import { startVisitIfScheduled } from '@/lib/fieldwork'
 import { projectFor } from '@/lib/data/projects'
 import { json, sameOrigin } from '@/lib/request'
 import { makeStorageKey, MAX_UPLOAD_BYTES, uploadTarget } from '@/lib/storage'
@@ -56,6 +57,8 @@ export async function POST(req: Request) {
     if (f.category === 'evidence') {
       const problem = fieldCollectionProblem(access.project, insp)
       if (problem) return json({ error: problem }, 409)
+      // The first photo starts the visit.
+      await startVisitIfScheduled(insp, access.project, user.id)
     }
     inspectionId = insp.id
   }

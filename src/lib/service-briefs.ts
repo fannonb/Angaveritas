@@ -145,13 +145,13 @@ export function briefAnswers(profile: BriefProfile, value: unknown): Record<stri
   if (record?.version !== 1 || record.profile !== profile.code || !record.answers || typeof record.answers !== 'object') return {}
   return Object.fromEntries(profile.fields.filter(f => typeof record.answers?.[f.key] === 'string').map(f => [f.key, record.answers![f.key]]))
 }
-export function validateServiceBrief(profile: BriefProfile, raw: Record<string, unknown>, final: boolean) {
+export function validateServiceBrief(profile: BriefProfile, raw: Record<string, unknown>, final: boolean, throughStep: 0 | 1 = 1) {
   const answers: Record<string, string> = {}
   for (const f of profile.fields) {
     const input = raw[f.key]
     const value = typeof input === 'string' ? input.trim() : ''
     if (value.length > 2000) return { error: `${f.label}: use at most 2,000 characters.`, field: f.key }
-    if (final && f.required && !value) return { error: `Please complete “${f.label}”.`, field: f.key }
+    if (final && f.step <= throughStep && f.required && !value) return { error: `Please complete “${f.label}”.`, field: f.key }
     if (value && f.type === 'select' && !f.options?.includes(value)) return { error: `Choose a valid option for “${f.label}”.`, field: f.key }
     if (value && f.type === 'date' && (!/^\d{4}-\d{2}-\d{2}$/.test(value) || !Number.isFinite(Date.parse(value)) || new Date(value).toISOString().slice(0, 10) !== value)) return { error: `Enter a valid date for “${f.label}”.`, field: f.key }
     if (value && f.type === 'url') {

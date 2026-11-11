@@ -4,11 +4,17 @@ import type { Confidence, FindingStatus, InspectionStatus } from '@/lib/labels'
 
 export type InspectionRow = {
   id: string
+  work_order_id: string
+  client_unlocked: boolean
+  work_hold_reason: string|null
+  brief_approved:boolean|null
+  payment_status:string
   project_id: string
   code: string
   title: string
   status: InspectionStatus
   scheduled_for: string | null
+  arrival_window: string | null
   agent_id: string | null
   agent_name: string | null
   objectives: string | null
@@ -41,10 +47,11 @@ export type FindingRow = {
 }
 
 const base = () => sql`
-  select i.*, a.full_name as agent_name, rv.full_name as reviewed_by_name,
+  select i.*,w.hold_reason work_hold_reason,(w.brief_approved_version=w.brief_version) brief_approved,work_payment_status(w.id) payment_status,work_order_unlocked(i.work_order_id) client_unlocked, a.full_name as agent_name, rv.full_name as reviewed_by_name,
     (select count(*)::int from files f where f.inspection_id = i.id and f.category = 'evidence' and f.status = 'ready') as evidence_count,
     (select count(*)::int from findings x where x.inspection_id = i.id) as finding_count
   from inspections i
+  left join work_orders w on w.id=i.work_order_id
   left join users a on a.id = i.agent_id
   left join users rv on rv.id = i.reviewed_by`
 
@@ -67,17 +74,17 @@ export async function listAgentInspections(agentId: string) {
     order by x.scheduled_for nulls last`
 }
 
-export async function createInspection(projectId: string, i: { title: string; scheduledFor: string | null; agentId: string | null; objectives: string | null; siteId?: string | null }, actorId: string) {
+export async function createInspection(projectId: string, i: { title: string; scheduledFor: string | null; arrivalWindow?: string | null; agentId: string | null; objectives: string | null; siteId?: string | null }, actorId: string) {
   const [row] = await sql<{ id: string; code: string }[]>`
-    insert into inspections (project_id, title, scheduled_for, agent_id, objectives, created_by,site_id)
-    values (${projectId}, ${i.title}, ${i.scheduledFor}, ${i.agentId}, ${i.objectives}, ${actorId},${i.siteId ?? null})
+    insert into inspections (project_id, title, scheduled_for, arrival_window, agent_id, objectives, created_by,site_id)
+    values (${projectId}, ${i.title}, ${i.scheduledFor}, ${i.arrivalWindow ?? null}, ${i.agentId}, ${i.objectives}, ${actorId},${i.siteId ?? null})
     returning id, code`
   return row
 }
 
-export async function updateInspectionPlan(id: string, i: { title: string; scheduledFor: string | null; agentId: string | null; objectives: string | null }) {
+export async function updateInspectionPlan(id: string, i: { title: string; scheduledFor: string | null; arrivalWindow: string | null; agentId: string | null; objectives: string | null }) {
   await sql`
-    update inspections set title = ${i.title}, scheduled_for = ${i.scheduledFor}, agent_id = ${i.agentId}, objectives = ${i.objectives}
+    update inspections set title = ${i.title}, scheduled_for = ${i.scheduledFor}, arrival_window = ${i.arrivalWindow}, agent_id = ${i.agentId}, objectives = ${i.objectives}
     where id = ${id}`
 }
 
@@ -85,9 +92,9 @@ export async function saveFieldNotes(id: string, notes: string | null, actorId: 
   await withActor(actorId, async tx => tx`update inspections set field_notes = ${notes}, field_notes_by = ${actorId} where id = ${id}`)
 }
 
-export async function setInspectionStatus(id: string, status: InspectionStatus, actorId: string) {
+export async function setInspectionStatus(id: string, status: InspectionStatus, actorId: string, reviewException: string | null = null) {
   await withActor(actorId, async sql => sql`
-    update inspections set status = ${status}::inspection_status,
+    update inspections set review_exception=case when ${status}='reviewed' then ${reviewException} else review_exception end, status = ${status}::inspection_status,
       started_at = case when ${status}::text = 'in_progress' then coalesce(started_at, now()) else started_at end,
       submitted_at = case when ${status}::text = 'submitted' then now() else submitted_at end,
       reviewed_at = case when ${status}::text = 'reviewed' then now() else reviewed_at end,
@@ -104,7 +111,7 @@ export async function listFindings(inspectionId: string) {
 export async function listProjectFindings(projectId: string, reviewedOnly: boolean) {
   return sql<(FindingRow & { inspection_code: string })[]>`
     select f.*, i.code as inspection_code from findings f join inspections i on i.id = f.inspection_id
-    where i.project_id = ${projectId} and ${reviewedOnly ? sql`i.status = 'reviewed'` : sql`true`}
+    where i.project_id = ${projectId} and ${reviewedOnly ? sql`i.status = 'reviewed' and work_order_unlocked(i.work_order_id)` : sql`true`}
     order by i.scheduled_for nulls last, f.position`
 }
 

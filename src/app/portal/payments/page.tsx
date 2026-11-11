@@ -13,6 +13,7 @@ import { paystackEnabled } from '@/lib/paystack'
 export const metadata = { title: 'Payments' }
 
 const statusLabel: Record<InvoiceStatus, { text: string; chip: string }> = {
+  credit: { text: 'Refund to arrange', chip: 'chip chip--info' },
   paid: { text: 'Paid', chip: 'chip chip--ok' },
   part: { text: 'Part paid', chip: 'chip chip--warn' },
   due: { text: 'To pay', chip: 'chip chip--warn' },
@@ -113,7 +114,7 @@ export default async function PaymentsPage({ searchParams }: { searchParams: Pro
                           </td>
                           <td className="dim whitespace-nowrap">{fmtDate(i.created_at, user.timezone)}</td>
                           <td className="dim whitespace-nowrap">{i.due_on ? fmtDate(i.due_on, user.timezone) : 'On receipt'}</td>
-                          <td className="whitespace-nowrap text-right">{kes(i.amount_kes)}</td>
+                          <td className="whitespace-nowrap text-right">{kes(i.amount_kes)}{i.owed_kes<0&&<span className="block text-xs text-muted">{kes(-i.owed_kes)} overpaid</span>}</td>
                           <td className="whitespace-nowrap text-right">{kes(i.paid_kes)}</td>
                           <td className="whitespace-nowrap text-right font-semibold">{i.status === 'waived' ? '—' : kes(Math.max(0, i.owed_kes))}</td>
                           <td className="whitespace-nowrap"><span className={statusLabel[i.status].chip}>{statusLabel[i.status].text}</span></td>

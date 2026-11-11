@@ -105,6 +105,15 @@ export async function threadsAwaitingReply() {
     left join projects p on p.id = l.project_id
     left join requests r on r.id = l.request_id
     where u.role = 'client'
+      and not exists (select 1 from reply_dismissals d
+        where d.thread = case when l.project_id is not null then 'p:' || l.project_id else 'r:' || l.request_id end
+          and d.last_message_at >= date_trunc('milliseconds', l.created_at)) -- JavaScript dates keep milliseconds only
     order by l.created_at desc
     limit 50`
+}
+
+/** Clears a client message that needs no reply. It returns to the queue if the client writes again. */
+export async function dismissReply(thread: string, lastMessageAt: Date, staffId: string) {
+  await sql`insert into reply_dismissals (thread, last_message_at, dismissed_by) values (${thread}, ${lastMessageAt}, ${staffId})
+    on conflict (thread) do update set last_message_at = excluded.last_message_at, dismissed_by = excluded.dismissed_by, dismissed_at = now()`
 }

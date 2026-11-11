@@ -36,8 +36,8 @@ describe.skipIf(!enabled)('database confidentiality and report integrity', () =>
     const user = async (role: string) => (await state.sql`insert into users(email,full_name,role) values (${`${role}@test.invalid`}, ${role}, ${role}::user_role) returning id`)[0].id as string
     client = await user('client'); otherClient = (await state.sql`insert into users(email,full_name) values ('other@test.invalid','Other') returning id`)[0].id
     agent = await user('field_agent'); analyst = await user('analyst'); admin = await user('admin')
-    const makeProject = async (owner: string) => (await state.sql`insert into projects(client_id,title,data_consent_at,onboarding_submitted_at,payment_status,lead_analyst_id,field_agent_id,stage)
-      values (${owner},'Project',now(),now(),'paid',${analyst},${agent},'planning') returning id`)[0].id as string
+    const makeProject = async (owner: string) => (await state.sql`insert into projects(client_id,title,data_consent_at,onboarding_submitted_at,payment_status,lead_analyst_id,field_agent_id,stage,contract_value_kes)
+      values (${owner},'Project',now(),now(),'paid',${analyst},${agent},'planning',100000) returning id`)[0].id as string
     project = await makeProject(client); otherProject = await makeProject(otherClient)
     inspection = (await state.sql`insert into inspections(project_id,title,agent_id) values (${project},'Visit',${agent}) returning id`)[0].id
     otherInspection = (await state.sql`insert into inspections(project_id,title,agent_id) values (${otherProject},'Other visit',${agent}) returning id`)[0].id
@@ -139,37 +139,39 @@ describe.skipIf(!enabled)('database confidentiality and report integrity', () =>
   })
   it('reconciles partial payments/refunds and rejects duplicate or excessive entries', async () => {
     const invoiceId=await issueInvoice(otherProject,admin,{label:'Test billing',amount:10000,deposit:3000,dueOn:null,beyondContract:true})
-    await recordPayment(otherProject,admin,{invoiceId,amount:3000,kind:'payment',reference:'deposit-1',note:'Reconciled'})
+    await recordPayment(otherProject,admin,{invoiceId,amount:6000,kind:'payment',reference:'deposit-1',note:'Reconciled'})
     expect((await state.sql`select payment_status from projects where id=${otherProject}`)[0].payment_status).toBe('deposit_received')
     await expect(recordPayment(otherProject,admin,{invoiceId,amount:8000,kind:'payment',reference:'overpayment',note:'Too much'})).rejects.toThrow('exceeds')
-    await expect(recordPayment(otherProject,admin,{invoiceId,amount:3000,kind:'payment',reference:'deposit-1',note:'Duplicate'})).rejects.toThrow()
-    await recordPayment(otherProject,admin,{invoiceId,amount:7000,kind:'payment',reference:'balance-1',note:'Reconciled'})
+    await expect(recordPayment(otherProject,admin,{invoiceId,amount:6000,kind:'payment',reference:'deposit-1',note:'Duplicate'})).rejects.toThrow()
+    await recordPayment(otherProject,admin,{invoiceId,amount:4000,kind:'payment',reference:'balance-1',note:'Reconciled'})
     await recordPayment(otherProject,admin,{invoiceId,amount:1000,kind:'refund',reference:'refund-1',note:'Reconciled'})
     await expect(recordPayment(otherProject,admin,{invoiceId,amount:10000,kind:'refund',reference:'refund-too-much',note:'Invalid'})).rejects.toThrow('exceed')
   })
   it('blocks accidental double billing, cancels only unpaid invoices and keeps issued amounts fixed', async () => {
     const [{ id: billed }]=await state.sql`insert into projects(client_id,title,contract_value_kes,lead_analyst_id,stage) values (${client},'Billing',5000,${analyst},'planning') returning id`
     const first=await issueInvoice(billed,admin,{label:'Agreed scope',amount:5000,deposit:2000,dueOn:null})
-    await expect(issueInvoice(billed,admin,{label:'Agreed scope',amount:5000,deposit:2000,dueOn:null})).rejects.toThrow('against a contract')
-    const extra=await issueInvoice(billed,admin,{label:'Extra site',amount:1500,deposit:0,dueOn:null,beyondContract:true})
+    await expect(issueInvoice(billed,admin,{label:'Agreed scope',amount:5000,deposit:2000,dueOn:null})).rejects.toThrow('client must accept')
+    const [approval]=await state.sql`insert into workflow_cases(project_id,kind,title,detail,created_by,status,amount_kes,accepted_by,accepted_at) values (${billed},'scope_change','Extra site','Additional agreed site',${admin},'accepted',1500,${client},now()) returning id`
+    const extra=await issueInvoice(billed,admin,{label:'Extra site',amount:1500,deposit:0,dueOn:null,acceptedCaseId:approval.id})
     await expect(state.sql`update invoices set amount_kes=1 where id=${extra}`).rejects.toThrow('cannot be changed')
     await expect(cancelInvoice(billed,admin,extra,'no')).rejects.toThrow('reason')
     await cancelInvoice(billed,admin,extra,'Raised in error')
     expect((await state.sql`select status,cancel_reason from invoices where id=${extra}`)[0]).toMatchObject({status:'cancelled',cancel_reason:'Raised in error'})
     await expect(state.sql`update invoices set status='issued' where id=${extra}`).rejects.toThrow('cannot be reissued')
-    await recordPayment(billed,admin,{invoiceId:first,amount:2000,kind:'payment',reference:'agreed-deposit',note:'Reconciled'})
+    await recordPayment(billed,admin,{invoiceId:first,amount:3000,kind:'payment',reference:'agreed-deposit',note:'Reconciled'})
     await expect(cancelInvoice(billed,admin,first,'Changed my mind')).rejects.toThrow('refund')
     expect((await state.sql`select payment_status from projects where id=${billed}`)[0].payment_status).toBe('deposit_received')
   })
   it('closes matching payment notices, keeps chasing the balance and reminds once a week', async () => {
     const [{ id: owed }]=await state.sql`insert into projects(client_id,title,contract_value_kes,lead_analyst_id,stage) values (${client},'Balance',8000,${analyst},'planning') returning id`
     const invoiceId=await issueInvoice(owed,admin,{label:'Agreed scope',amount:8000,deposit:3000,dueOn:'2020-01-01'})
-    await submitPaymentNotice(owed,client,{invoiceId,amount:3000,reference:'MPESA-ABC1',note:''})
+    await state.sql`update invoices set balance_on_delivery=false where id=${invoiceId}`
+    await submitPaymentNotice(owed,client,{invoiceId,amount:4800,reference:'MPESA-ABC1',note:''})
     expect(await sendBalanceReminders(null)).toBe(0)
-    await recordPayment(owed,admin,{invoiceId,amount:3000,kind:'payment',reference:'MPESA-ABC1',note:'Seen on statement'})
+    await recordPayment(owed,admin,{invoiceId,amount:4800,kind:'payment',reference:'MPESA-ABC1',note:'Seen on statement'})
     const [notice]=await state.sql`select id,status from payment_notices where invoice_id=${invoiceId}`
     expect(notice.status).toBe('confirmed')
-    await expect(recordPayment(owed,admin,{invoiceId,amount:3000,kind:'payment',reference:'MPESA-ABC1',note:'Again',noticeId:notice.id})).rejects.toThrow('already recorded')
+    await expect(recordPayment(owed,admin,{invoiceId,amount:1,kind:'payment',reference:'MPESA-ABC1',note:'Again',noticeId:notice.id})).rejects.toThrow('already recorded')
     expect((await state.sql`select payment_status from projects where id=${owed}`)[0].payment_status).toBe('deposit_received')
     expect((await staffStats()).balance_outstanding).toBeGreaterThanOrEqual(1)
     expect(await sendBalanceReminders(null)).toBe(1)
@@ -181,7 +183,8 @@ describe.skipIf(!enabled)('database confidentiality and report integrity', () =>
   it('keeps a waiver through cancellations and part payments until the ledger is settled', async () => {
     const [{ id: waived }]=await state.sql`insert into projects(client_id,title,contract_value_kes,lead_analyst_id,stage) values (${client},'Waived',2000,${analyst},'planning') returning id`
     const invoiceId=await issueInvoice(waived,admin,{label:'Agreed scope',amount:2000,deposit:2000,dueOn:null})
-    const extra=await issueInvoice(waived,admin,{label:'Raised twice',amount:2000,deposit:2000,dueOn:null,beyondContract:true})
+    const [approval]=await state.sql`insert into workflow_cases(project_id,kind,title,detail,created_by,status,amount_kes,accepted_by,accepted_at) values (${waived},'scope_change','Extra work','Additional agreed work',${admin},'accepted',2000,${client},now()) returning id`
+    const extra=await issueInvoice(waived,admin,{label:'Raised twice',amount:2000,deposit:2000,dueOn:null,acceptedCaseId:approval.id})
     await state.sql`update projects set payment_status='waived',payment_status_set_at=clock_timestamp() where id=${waived}`
     const status=async () => (await state.sql`select payment_status from projects where id=${waived}`)[0].payment_status
     await cancelInvoice(waived,admin,extra,'Duplicate invoice')
@@ -210,6 +213,7 @@ describe.skipIf(!enabled)('database confidentiality and report integrity', () =>
     const [cycle]=await state.sql`select * from monitoring_cycles where project_id=${otherProject}`
     await expect(dispatchMonitoringCycle(otherProject,admin,cycle.id)).rejects.toThrow('payment')
     await recordPayment(otherProject,admin,{invoiceId:cycle.invoice_id,amount:2500,kind:'payment',reference:'cycle-paid',note:'Reconciled'})
+    await state.sql`update work_orders set brief_approved_version=brief_version,brief_approved_at=now(),brief_approved_by=${analyst} where id=(select work_order_id from invoices where id=${cycle.invoice_id})`
     await dispatchMonitoringCycle(otherProject,admin,cycle.id)
     await expect(dispatchMonitoringCycle(otherProject,admin,cycle.id)).rejects.toThrow('already')
     await state.sql`update projects set next_cycle_on='2020-01-01' where id=${otherProject}`

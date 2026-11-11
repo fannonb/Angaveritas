@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
 try { process.loadEnvFile('.env.local') } catch {}
 if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required. Tests create and remove an isolated av_test schema; existing application data is untouched.')
-const result = spawnSync(process.execPath,['node_modules/vitest/vitest.mjs','run','tests/integrity.integration.test.ts','tests/workflow-security.integration.test.ts','tests/accounts.integration.test.ts','tests/paystack.integration.test.ts'],{ stdio:'inherit',env:{...process.env,RUN_DATABASE_TESTS:'1'} })
+const result = spawnSync(process.execPath,['node_modules/vitest/vitest.mjs','run','tests/integrity.integration.test.ts','tests/workflow-security.integration.test.ts','tests/accounts.integration.test.ts','tests/paystack.integration.test.ts','tests/billing.integration.test.ts','tests/audit-acceptance.integration.test.ts','tests/upload-queue.integration.test.ts'],{ stdio:'inherit',env:{...process.env,RUN_DATABASE_TESTS:'1'} })
 process.exitCode = result.status ?? 1

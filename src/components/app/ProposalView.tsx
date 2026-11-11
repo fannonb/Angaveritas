@@ -1,3 +1,4 @@
+import { requiredDeposit } from '@/lib/billing'
 import Link from 'next/link'
 import type { ProposalRow } from '@/lib/data/proposals'
 import { proposalStatusLabels } from '@/lib/labels'
@@ -79,7 +80,7 @@ export default function ProposalView({ p, reference, clientName, tz }: { p: Prop
         <section>
           <h3 className="text-base">Payment</h3>
           <p className="prose-text mt-2">{p.payment_terms}</p>
-          <p className="hint mt-2">To pay before the site visit: {kes(p.deposit_kes ?? p.total_kes)}.</p>
+          <p className="hint mt-2">To pay before the site visit: {kes(p.deposit_kes ?? requiredDeposit(p.total_kes))}.</p>
         </section>
 
         <p className="text-sm text-ink-2">

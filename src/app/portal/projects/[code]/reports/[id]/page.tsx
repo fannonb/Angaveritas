@@ -22,7 +22,7 @@ export default async function ClientReportPage({ params: paramsPromise }: { para
   const r = await getReport(params.id)
   if (!access || !r || r.project_id !== access.project.id || r.status !== 'published' || !r.snapshot) notFound()
   const p = access.project
-  const lock = await reportLock(p.id)
+  const lock = await reportLock(p.id, r.id)
   if (lock) return (
     <div className="space-y-6">
       <div className="no-print">
@@ -46,7 +46,8 @@ export default async function ClientReportPage({ params: paramsPromise }: { para
         <Link href={`/portal/projects/${p.code}?tab=reports`} className="text-sm">← {p.title}</Link>
         <div className="flex flex-wrap gap-2">
           {r.pdf_file_id && <a className="btn btn-primary btn-small" href={`/api/files/${r.pdf_file_id}?download`}>Download PDF report</a>}
-          <PrintButton />
+          {r.status==='published'&&<a className="btn btn-primary btn-small" href={`/api/reports/${r.id}/pdf`}>Download approved report PDF</a>}
+        <PrintButton />
         </div>
       </div>
 

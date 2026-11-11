@@ -2,7 +2,7 @@
 import Link from 'next/link'
 import { useEffect,useState } from 'react'
 
-export default function PaystackPaymentStatus({ reference,initialStatus,invoiceHref,testMode }: { reference: string; initialStatus: string; invoiceHref: string; testMode: boolean }) {
+export default function PaystackPaymentStatus({ reference,initialStatus,invoiceHref,payHref,testMode }: { reference: string; initialStatus: string; invoiceHref: string; payHref: string; testMode: boolean }) {
   const [status,setStatus] = useState(initialStatus)
   const [busy,setBusy] = useState(false)
   const [message,setMessage] = useState('')
@@ -24,24 +24,26 @@ export default function PaystackPaymentStatus({ reference,initialStatus,invoiceH
     // A return from checkout triggers one server verification; later polling only reads saved status.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   },[reference])
+  const ended = status === 'failed' || status === 'abandoned'
+  const titles: Record<string,string> = { success:'Payment received', failed:'Payment did not go through', abandoned:'Payment not completed', review:'Payment being checked by our team' }
   const descriptions: Record<string,string> = {
-    success:'Your payment is confirmed and your invoice has been updated. Your receipt will be emailed to you.',
-    failed:'This payment attempt failed. Open your invoice to try again. If money was deducted, contact the team with the reference below.',
-    abandoned:'Checkout was not completed. Open your invoice to try again, or check again if you completed payment.',
-    review:'Your payment needs a check by our team. Please contact your analyst with the reference below before paying again.',
-    pending:'We are waiting for payment confirmation. If you paid, please check again before starting another payment.',
-    initializing:'Checkout is being checked. If you paid, please wait for confirmation before starting another payment.',
+    success:'Your invoice is updated and your receipt is on its way by email.',
+    failed:'Nothing was recorded. You can try again now. If money left your account, message us with the reference below.',
+    abandoned:'The checkout was closed before paying, so nothing was recorded. You can try again now.',
+    review:'Please message your analyst with the reference below before paying again.',
+    pending:'Waiting for confirmation from Paystack. If you finished paying, this updates on its own in a moment.',
+    initializing:'Waiting for confirmation from Paystack. If you finished paying, this updates on its own in a moment.',
   }
   return <section className="panel panel-pad space-y-4" aria-live="polite">
-    <h1 className="text-xl">{status === 'success' ? 'Payment received' : 'Payment status'}</h1>
-    {testMode && <p className="hint">Test payment · no live funds collected</p>}
+    <h1 className="text-xl">{titles[status] ?? 'Checking your payment'}</h1>
+    {testMode && <p className="hint">Test payment · no real money</p>}
     <p>{descriptions[status] ?? 'Your payment is being checked.'}</p>
-    <p className="text-sm break-all">Reference: {reference}</p>
     {message && <p className="hint">{message}</p>}
     <div className="flex flex-wrap gap-3">
-      {status !== 'success' && <button className="btn btn-secondary btn-small" disabled={busy} onClick={() => check(true)}>{busy ? 'Checking…' : 'Check again'}</button>}
-      <Link className="btn btn-primary btn-small" href={invoiceHref}>View invoice</Link>
-      <Link className="btn btn-secondary btn-small" href="/portal/payments">All payments</Link>
+      {ended && <Link className="btn btn-primary" href={payHref}>Try again</Link>}
+      {(status === 'pending' || status === 'initializing') && <button className="btn btn-secondary btn-small" disabled={busy} onClick={() => check(true)}>{busy ? 'Checking…' : 'Check again'}</button>}
+      <Link className={`btn ${ended ? 'btn-secondary' : 'btn-primary'} btn-small`} href={invoiceHref}>View invoice</Link>
     </div>
+    <p className="text-xs break-all text-muted">Reference: {reference}</p>
   </section>
 }

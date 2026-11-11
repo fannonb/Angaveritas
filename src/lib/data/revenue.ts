@@ -11,7 +11,7 @@ export async function revenueSummary() {
     claims: number; claims_kes: number
   }[]>`
     with inv as (
-      select i.id, i.project_id, i.amount_kes, i.due_on,
+      select i.id, i.project_id, i.amount_kes, invoice_due_on(i.id) due_on,
         i.amount_kes - coalesce((select sum(case when pay.kind = 'payment' then pay.amount_kes else -pay.amount_kes end)::int from payments pay where pay.invoice_id = i.id), 0) as unpaid
       from invoices i
       where i.status = 'issued'
@@ -46,7 +46,7 @@ export async function revenueSummary() {
     id: string; code: string; label: string; due_on: string | null; sent_at: Date | null; amount_kes: number; paid_kes: number; unpaid_kes: number
     project_id: string; project_code: string; project_title: string; client_name: string; payment_status: string
   }[]>`
-    select i.id, i.code, i.label, i.due_on::text as due_on, i.sent_at, i.amount_kes,
+    select i.id, i.code, i.label, invoice_due_on(i.id)::text as due_on, i.sent_at, i.amount_kes,
       coalesce((select sum(case when kind = 'payment' then amount_kes else -amount_kes end) from payments where invoice_id = i.id), 0)::int as paid_kes,
       (i.amount_kes - coalesce((select sum(case when kind = 'payment' then amount_kes else -amount_kes end) from payments where invoice_id = i.id), 0))::int as unpaid_kes,
       p.id as project_id, p.code as project_code, p.title as project_title, u.full_name as client_name, p.payment_status
@@ -55,7 +55,7 @@ export async function revenueSummary() {
     join users u on u.id = p.client_id
     where i.status = 'issued' and p.payment_status <> 'waived'
       and i.amount_kes > coalesce((select sum(case when kind = 'payment' then amount_kes else -amount_kes end) from payments where invoice_id = i.id), 0)
-    order by i.due_on nulls last, i.code
+    order by invoice_due_on(i.id) nulls last, i.code
     limit 200`
 
   const claims = await sql<{ id: string; reference: string; amount_kes: number; created_at: Date; invoice_code: string; project_code: string; project_title: string }[]>`

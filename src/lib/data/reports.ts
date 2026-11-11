@@ -10,6 +10,8 @@ export type ReportSnapshot = { project: ProjectView; findings: FindingRow[]; evi
 
 export type ReportRow = {
   id: string
+  work_order_id: string
+  client_unlocked: boolean
   project_id: string
   inspection_id: string | null
   inspection_code: string | null
@@ -25,6 +27,7 @@ export type ReportRow = {
   author_name: string | null
   reviewer_id: string | null
   reviewer_name: string | null
+  review_exception: string | null
   submitted_at: Date | null
   published_at: Date | null
   client_rating: number | null
@@ -40,7 +43,7 @@ export type ReportRow = {
 }
 
 const base = () => sql`
-  select r.*, i.code as inspection_code, a.full_name as author_name, v.full_name as reviewer_name,
+  select r.*,work_order_unlocked(r.work_order_id) client_unlocked, i.code as inspection_code, a.full_name as author_name, v.full_name as reviewer_name,
     (select rr.first_viewed_at from report_reads rr join projects p on p.client_id=rr.user_id where rr.report_id=r.id and p.id=r.project_id) as client_viewed_at
   from reports r
   left join inspections i on i.id = r.inspection_id
@@ -71,10 +74,14 @@ export async function validateReportInspection(projectId: string, inspectionId: 
 export async function createReport(projectId: string, r: { title: string; inspectionId: string | null; supersedesId?: string | null }, authorId: string) {
   await validateReportInspection(projectId, r.inspectionId)
   return withActor(authorId, async tx => {
+    // One report in progress per project: a second click or a slow response opens the existing draft instead of a duplicate.
+    await tx`select id from projects where id = ${projectId} for update`
+    const [open] = await tx<{ id: string }[]>`select id from reports where project_id = ${projectId} and work_order_id=(select active_work_order_id from projects where id=${projectId}) and status in ('draft', 'in_review') order by created_at limit 1`
+    if (open) return open.id
     const [row] = await tx<{ id: string }[]>`
       insert into reports (project_id, inspection_id, title, limitations, author_id, scope, supersedes_id)
       values (${projectId}, ${r.inspectionId}, ${r.title}, ${defaultLimitations}, ${authorId},
-        coalesce((select array_to_string(scope_items, E'\n') from proposals where id = (select proposal_id from projects where id = ${projectId})), ''), ${r.supersedesId ?? null}) returning id`
+        coalesce((select scope from work_orders where id = (select active_work_order_id from projects where id = ${projectId})), ''), ${r.supersedesId ?? null}) returning id`
     return row.id
   })
 }
@@ -94,16 +101,20 @@ export async function updateReport(
     where id = ${id} and status = 'draft'`)
 }
 
-export async function publishReport(id: string, reviewer: { id: string; full_name: string; role: string }, project: ProjectView) {
+export async function publishReport(id: string, reviewer: { id: string; full_name: string; role: string }, project: ProjectView, reviewException: string | null = null) {
   return withActor(reviewer.id, async tx => {
     const [r] = await tx<ReportRow[]>`select * from reports where id = ${id} and project_id = ${project.id} for update`
     if (!r || r.status !== 'in_review') throw new Error('Only a report awaiting review can be published.')
     if (reviewer.role !== 'admin') throw new Error('Only an admin can approve and publish a report.')
     const [p] = await tx<ProjectView[]>`select p.*, c.full_name client_name, a.full_name analyst_name, f.full_name agent_name from projects p
       join users c on c.id = p.client_id left join users a on a.id = p.lead_analyst_id left join users f on f.id = p.field_agent_id where p.id = ${project.id} for update of p`
-    const inspections = await tx`select * from inspections where project_id = ${p.id} and status = 'reviewed'
+    const [work]=await tx`select * from work_orders where id=${r.work_order_id} for update`
+    await tx`select assert_work_ready(${r.work_order_id})`
+    if((await tx`select 1 from workflow_cases where report_id=${id} and kind='report_correction' and status='open'`).length)throw new Error('Resolve the requested report corrections before publication.')
+    const inspections = await tx`select * from inspections where project_id = ${p.id} and work_order_id=${r.work_order_id} and status = 'reviewed'
       and ${r.inspection_id ? tx`id = ${r.inspection_id}` : tx`true`} order by id for update`
     if (!inspections.length || (r.inspection_id && inspections.length !== 1)) throw new Error('Reports require reviewed inspections from this project.')
+    if(!r.inspection_id && inspections.length<work.required_sites)throw new Error('Complete all required site visits before publishing the engagement report.')
     const ids = inspections.map(i => i.id as string)
     const findings = await tx<FindingRow[]>`select * from findings where inspection_id in ${tx(ids)} order by inspection_id, position, id for share`
     const evidence = await tx<FileRow[]>`select f.* from files f where project_id = ${p.id} and inspection_id in ${tx(ids)}
@@ -113,15 +124,15 @@ export async function publishReport(id: string, reviewer: { id: string; full_nam
     if (findings.some(f => f.status !== 'unverified' && (!f.evidence_ids?.length || f.evidence_ids.some(e => !evidence.some(item => item.id === e)))))
       throw new Error('Link each verified finding to released evidence from the report inspections.')
     const [author] = await tx`select full_name from users where id = ${r.author_id}`
-    const snapshot = { project: p, findings, evidence, report: { ...r, snapshot: undefined, status: 'published', published_at: new Date(), author_name: author?.full_name ?? null, reviewer_name: reviewer.full_name, reviewer_id: reviewer.id } }
-    await tx`update reports set status = 'published', published_at = now(), reviewer_id = ${reviewer.id}, snapshot = ${tx.json(snapshot as never)} where id = ${id}`
+    const snapshot = { project: p, findings, evidence, report: { ...r, snapshot: undefined, status: 'published', review_exception: reviewException, published_at: new Date(), author_name: author?.full_name ?? null, reviewer_name: reviewer.full_name, reviewer_id: reviewer.id } }
+    await tx`update reports set review_exception=${reviewException}, status = 'published', published_at = now(), reviewer_id = ${reviewer.id}, snapshot = ${tx.json(snapshot as never)} where id = ${id}`
     for (const file of evidence) await tx`insert into report_evidence (report_id,file_id) values (${id},${file.id})`
     if (r.pdf_file_id) {
       await tx`insert into report_evidence (report_id,file_id) values (${id},${r.pdf_file_id}) on conflict do nothing`
       await tx`update files set visible_to_client = true where id = ${r.pdf_file_id}`
     }
     const health = r.overall_status === 'ok' ? 'on_track' : r.overall_status === 'warn' ? 'at_risk' : 'high_risk'
-    await tx`update projects set stage = case when engagement = 'retainer' then 'monitoring'::project_stage else 'delivered'::project_stage end, health = ${health}::health_status where id = ${p.id}`
+    await tx`update projects set stage = case when engagement = 'retainer' then 'monitoring'::project_stage else 'delivered'::project_stage end, health = ${health}::health_status where id = ${p.id} and active_work_order_id=${r.work_order_id}`
     return r
   })
 }
@@ -153,7 +164,7 @@ export async function setReportStatus(id: string, status: ReportStatus, actorId:
 export async function rateReport(id: string, projectId: string, rating: number, feedback: string | null) {
   await sql`
     update reports set client_rating = ${rating}, client_feedback = ${feedback}
-    where id = ${id} and project_id = ${projectId} and status = 'published' and client_reports_unlocked(project_id)`
+    where id = ${id} and project_id = ${projectId} and status = 'published' and work_order_unlocked(work_order_id)`
 }
 
 export async function reportsAwaitingReview() {

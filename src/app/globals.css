@@ -15,8 +15,8 @@
 }
 
 :root {
-  --font: var(--font-neue-montreal), 'PP Neue Montreal', 'Neue Montreal', var(--font-plex), system-ui, -apple-system, 'Segoe UI', sans-serif;
-  --mono: var(--font-plex-mono), ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --font: var(--font-neue-montreal, 'PP Neue Montreal'), 'Neue Montreal', var(--font-plex, 'IBM Plex Sans'), system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --mono: var(--font-plex-mono, 'IBM Plex Mono'), ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
 /* What Tailwind preflight would do for borders, so border utilities work. site.css always uses the border shorthand. */
@@ -59,7 +59,7 @@ table { border-collapse: collapse; }
   .option-on { border-color: #0f172a; box-shadow: 0 0 0 1.5px #0f172a, 0 2px 4px 0 rgba(0,0,0,0.03); background: #ffffff; }
   .option input { accent-color: var(--ink); }
   .alert { padding: 0.85rem 1.15rem; border-radius: 10px; border: 1px solid; font-size: 0.925rem; }
-  .alert-ok { border-color: #a7f3d0; background: #ecfdf5; color: #065f46; }
+  .alert-ok { border-color: #e6d3a5; background: #f6eedc; color: #7a5a1a; }
   .alert-warn { border-color: #fde68a; background: #fffbeb; color: #92400e; }
   .alert-bad { border-color: #fecaca; background: #fef2f2; color: #991b1b; }
 
@@ -235,6 +235,8 @@ table { border-collapse: collapse; }
   .app-side { display: flex; flex-direction: column; padding: 0.6rem 0.75rem; border-radius: var(--card-radius); background: var(--surface); }
   @media (min-width: 1000px) { .app-side { position: sticky; top: 1rem; height: calc(100vh - 2rem); padding: 1.35rem 0.9rem 1rem; overflow-y: auto; scrollbar-width: thin; } }
   .app-side__bar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+  .app-side__actions { display: flex; flex: none; align-items: center; gap: 0.5rem; }
+  @media (min-width: 1000px) { .app-side__actions { display: none; } }
   .app-side__nav { display: flex; flex-direction: column; }
   @media (min-width: 1000px) { .app-side__nav { flex: 1; } }
   .app-logo { display: flex; flex-direction: column; align-items: flex-start; gap: 0.15rem; padding: 0.15rem 0.35rem; color: var(--ink); text-decoration: none; }
@@ -247,6 +249,8 @@ table { border-collapse: collapse; }
   @media (max-width: 999px) {
     .app-shell { grid-template-rows: auto 1fr; align-content: start; }
     .app-side { position: sticky; top: 0.5rem; z-index: 40; box-shadow: 0 6px 24px -12px rgba(22, 24, 24, 0.25); }
+    .app-side__bar { gap: 0.5rem; }
+    .app-logo { min-width: 0; }
     .app-side__nav { display: none; padding: 0.25rem 0 0.5rem; }
     .app-side.is-open .app-side__nav { display: flex; max-height: calc(100vh - 6rem); overflow-y: auto; }
   }
@@ -292,6 +296,16 @@ table { border-collapse: collapse; }
   .icon-btn { position: relative; display: grid; place-items: center; width: 2.75rem; height: 2.75rem; border-radius: 50%; background: var(--surface-2); color: var(--ink-2); font-size: 1.1rem; transition: background 0.15s, color 0.15s; }
   .icon-btn:hover { background: var(--brand-soft); color: var(--brand-deep); }
   .icon-btn__count { position: absolute; top: -0.15rem; right: -0.15rem; display: grid; place-items: center; min-width: 1.25rem; height: 1.25rem; padding: 0 0.3rem; border: 2px solid #fff; border-radius: 999px; background: var(--brand-deep); color: #fff; font-size: 0.65rem; font-weight: 700; line-height: 1; }
+  .notification-panel { position: fixed; inset: 0 0 0 auto; margin: 0; width: min(100%, 27rem); max-width: none; height: 100dvh; max-height: none; padding: 0; background: var(--surface); color: var(--ink); box-shadow: -12px 0 36px rgb(22 24 24 / 0.15); }
+  .notification-panel::backdrop { background: rgb(22 24 24 / 0.34); }
+  html:has(.notification-panel[open]) { overflow: hidden; }
+  .notification-panel__inner { display: flex; flex-direction: column; height: 100%; }
+  .notification-panel__header, .notification-panel__toolbar { display: flex; flex: none; align-items: center; justify-content: space-between; gap: 1rem; padding-inline: 1.25rem; border-bottom: 1px solid var(--line); }
+  .notification-panel__header { padding-block: 1rem; }
+  .notification-panel__header .icon-btn { flex: none; }
+  .notification-panel__body { flex: 1; overflow-y: auto; overscroll-behavior: contain; }
+  .notification-panel__item { padding: 0.9rem 1.25rem; overflow-wrap: anywhere; }
+  .notification-panel__item[data-unread='true'] { background: var(--brand-soft); }
   .app-user { display: flex; align-items: center; gap: 0.7rem; min-width: 0; max-width: 17rem; padding: 0.2rem 0.75rem 0.2rem 0.25rem; border-radius: 999px; color: var(--ink); text-decoration: none; }
   a.app-user:hover { background: var(--surface-2); color: var(--ink); }
   .app-avatar { display: grid; place-items: center; flex: none; width: 2.6rem; height: 2.6rem; border-radius: 50%; background: var(--brand-soft); color: var(--brand-text); font-size: 0.78rem; font-weight: 600; letter-spacing: 0.02em; }
@@ -425,7 +439,7 @@ table { border-collapse: collapse; }
   :where(.app-ui) .option:hover { border-color: var(--line-strong); background: var(--brand-tint); }
   :where(.app-ui) .option-on { border-color: var(--brand-text); box-shadow: 0 0 0 1.5px var(--brand); background: var(--brand-tint); }
   :where(.app-ui) .alert { border-radius: 16px; }
-  :where(.app-ui) .alert-ok { border-color: #a9dbbb; background: #eaf7ef; color: #13573a; }
+  :where(.app-ui) .alert-ok { border-color: #e6d3a5; background: var(--brand-soft); color: var(--brand-text); }
 
   /* ---------- Tables ---------- */
   :where(.app-ui) .table-scroll { border-color: rgba(22, 24, 24, 0.04); border-radius: var(--card-radius); box-shadow: none; }
@@ -613,4 +627,49 @@ table { border-collapse: collapse; }
   .invoice-toolbar { display: none !important; }
   .invoice { max-width: none; border: 0; border-radius: 0; padding: 0; }
   @page { size: A4; margin: 16mm; }
+}
+
+/* ==========================================================================
+   Site location map (src/components/app/SiteLocationField.tsx).
+   Leaflet's own stylesheet is imported by that component; these rules only
+   fix how the global reset and site.css interact with it.
+   ========================================================================== */
+.site-map {
+  height: 260px;
+  border: 1px solid #cbd5e1;
+  border-radius: 9px;
+  background: #e8ebe9;
+  overflow: hidden;
+  isolation: isolate; /* keeps Leaflet's panes and controls under page dropdowns */
+}
+@media (min-width: 640px) {
+  .site-map { height: 300px; }
+}
+/* site.css sets img { max-width: 100% }, which must not shrink map tiles */
+.site-map img { max-width: none !important; max-height: none !important; }
+/* CSS-drawn pin inside a Leaflet divIcon: no image files for bundlers to break */
+.site-pin-icon { border: 0; background: none; touch-action: none; }
+.site-pin {
+  display: block;
+  box-sizing: border-box;
+  position: relative;
+  width: 26px;
+  height: 26px;
+  margin: 0 auto;
+  border: 2px solid #fff;
+  border-radius: 50% 50% 50% 0;
+  background: var(--ink, #161818);
+  transform: rotate(-45deg);
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.35);
+}
+.site-pin::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 8px;
+  height: 8px;
+  margin: -4px 0 0 -4px;
+  border-radius: 50%;
+  background: #fff;
 }

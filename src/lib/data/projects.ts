@@ -3,10 +3,14 @@ import { sql, withActor } from '@/lib/db'
 import type { SessionUser } from '@/lib/auth/session'
 import type { Health, ProjectStage } from '@/lib/labels'
 import { TECHNICAL_EVENT_PATTERN } from '@/lib/workflow'
-import { briefAnswers, briefProfile } from '@/lib/service-briefs'
+import { briefAnswers, briefProfile, validateServiceBrief } from '@/lib/service-briefs'
 
 export type ProjectRow = {
   id: string
+  active_work_order_id: string
+  work_hold_reason: string | null
+  brief_approved: boolean
+  required_sites: number
   code: string
   client_id: string
   request_id: string | null
@@ -52,17 +56,22 @@ export type ProjectView = ProjectRow & {
   agent_name: string | null
   request_reference: string | null
   next_inspection: string | null
+  next_arrival: string | null
   published_reports: number
 }
 
 const view = () => sql`
-  select p.*,
+  select p.*, w.hold_reason work_hold_reason,(w.brief_approved_version=w.brief_version) brief_approved,w.required_sites,
     c.full_name as client_name, c.email as client_email, c.phone as client_phone, c.based_in as client_based_in,
     a.full_name as analyst_name, f.full_name as agent_name, r.reference as request_reference,
     (select min(i.scheduled_for)::text from inspections i
        where i.project_id = p.id and i.status in ('scheduled', 'in_progress') and i.scheduled_for >= current_date) as next_inspection,
+    (select i.arrival_window from inspections i
+       where i.project_id = p.id and i.status in ('scheduled', 'in_progress') and i.scheduled_for >= current_date
+       order by i.scheduled_for, i.created_at limit 1) as next_arrival,
     (select count(*)::int from reports rp where rp.project_id = p.id and rp.status = 'published') as published_reports
   from projects p
+  left join work_orders w on w.id=p.active_work_order_id
   join users c on c.id = p.client_id
   left join users a on a.id = p.lead_analyst_id
   left join users f on f.id = p.field_agent_id
@@ -118,7 +127,7 @@ export async function listProjectsForClient(clientId: string) {
 }
 
 // Matches the definitions behind the staff overview counts in data/dashboard.ts.
-export const projectNeeds = { at_risk: 'At risk', unassigned: 'Need a team assigned', unpaid: 'Awaiting payment', balance: 'Balance outstanding' } as const
+export const projectNeeds = { at_risk: 'At risk', unassigned: 'Need a team assigned', unpaid: 'Awaiting payment', balance: 'Balance outstanding', refund: 'Refund to arrange', confirm: 'Payment to confirm' } as const
 export type ProjectNeed = keyof typeof projectNeeds
 
 export async function listProjectsForStaff(user: SessionUser, opts: { stage?: ProjectStage | 'active' | 'all'; search?: string; clientId?: string; need?: ProjectNeed } = {}) {
@@ -132,7 +141,9 @@ export async function listProjectsForStaff(user: SessionUser, opts: { stage?: Pr
         opts.need === 'at_risk' ? sql`p.health in ('at_risk', 'high_risk')`
         : opts.need === 'unassigned' ? sql`p.stage in ('onboarding', 'planning', 'fieldwork') and (p.field_agent_id is null or p.lead_analyst_id is null)`
         : opts.need === 'unpaid' ? sql`p.payment_status = 'awaiting_payment'`
-        : opts.need === 'balance' ? sql`p.payment_status in ('deposit_received', 'paid') and exists(
+        : opts.need === 'confirm' ? sql`exists(select 1 from payment_notices n where n.project_id=p.id and n.status='pending')`
+        : opts.need === 'refund' ? sql`exists(select 1 from invoices i where i.project_id=p.id and i.status='issued' and i.amount_kes < coalesce((select sum(case when kind='payment' then amount_kes else -amount_kes end) from payments where invoice_id=i.id),0))`
+        : opts.need === 'balance' ? sql`p.payment_status <> 'waived' and exists(
             select 1 from invoices i where i.project_id = p.id and i.status = 'issued'
               and i.amount_kes > coalesce((select sum(case when kind = 'payment' then amount_kes else -amount_kes end)::int from payments pay where pay.invoice_id = i.id), 0))`
         : sql`true`
@@ -157,10 +168,13 @@ export async function projectStageCounts() {
 export async function saveOnboarding(
   projectId: string,
   clientId: string,
-  o: { title: string; locationLabel: string | null; county: string | null; siteDirections: string | null; siteAccessNotes: string | null; claims: string | null; concerns: string | null; investmentValueKes: number | null; serviceBrief?: import('@/lib/service-briefs').ServiceBriefRecord },
+  o: { title: string; locationLabel: string | null; county: string | null; locationLat?: number | null; locationLng?: number | null; siteDirections: string | null; siteAccessNotes: string | null; claims: string | null; concerns: string | null; investmentValueKes: number | null; serviceBrief?: import('@/lib/service-briefs').ServiceBriefRecord },
 ) {
+  // A pin left undefined keeps the stored one.
   await withActor(clientId, async sql => sql`
     update projects set title = ${o.title}, location_label = ${o.locationLabel}, county = ${o.county},
+      location_lat = ${o.locationLat === undefined ? sql`location_lat` : o.locationLat},
+      location_lng = ${o.locationLng === undefined ? sql`location_lng` : o.locationLng},
       site_directions = ${o.siteDirections}, site_access_notes = ${o.siteAccessNotes}, claims = ${o.claims},
       concerns = ${o.concerns}, investment_value_kes = ${o.investmentValueKes},
       service_brief = ${o.serviceBrief ? sql.json(o.serviceBrief) : sql`service_brief`}
@@ -169,6 +183,15 @@ export async function saveOnboarding(
 
 export async function submitOnboarding(projectId: string, clientId: string) {
   return withActor(clientId, async sql => {
+  const [project] = await sql<ProjectRow[]>`select * from projects where id=${projectId} and client_id=${clientId} for update`
+  if (!project) throw new Error('Project not found.')
+  if (!['onboarding','planning'].includes(project.stage)) throw new Error('The brief is locked now that work has started.')
+  if (project.onboarding_submitted_at && project.data_consent_at) return false
+  const profile = briefProfile(project)
+  const checked = validateServiceBrief(profile, briefAnswers(profile,project.service_brief), true)
+  if (checked.error) throw new Error(checked.error)
+  if (project.title.trim().length < 3) throw new Error('Please give the project a name.')
+  if (!project.location_label?.trim() && (profile.code==='feasibility' || (profile.physicalLocation && !project.site_directions?.trim()))) throw new Error(`Please provide ${profile.location.toLowerCase()}.`)
   const [row] = await sql<{ id: string }[]>`
     update projects set onboarding_submitted_at = now(), data_consent_at = coalesce(data_consent_at, now()),
       stage = case when stage = 'onboarding' then 'planning'::project_stage else stage end

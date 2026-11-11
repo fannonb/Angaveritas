@@ -21,7 +21,7 @@ export default async function ReviewsPage() {
     <div className="space-y-6">
       <div>
         <h1 className="app-title">Reviews</h1>
-        <p className="mt-1 text-ink-2">Nothing reaches a client until an admin has approved it.</p>
+        <p className="mt-1 text-ink-2">Inspections need an eligible reviewer; final reports need admin approval.</p>
       </div>
       <section className="panel">
         <div className="panel-head"><h2>Inspections submitted from the field</h2></div>

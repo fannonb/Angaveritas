@@ -1,12 +1,22 @@
 // Date and number formatting for the app. Dates show in the viewer's time
 // zone when known (clients abroad), otherwise East Africa Time.
 
+import { arrivalLabel } from '@/lib/labels'
+
 const TZ = 'Africa/Nairobi'
 
 export function fmtDate(d: Date | string | null | undefined, tz = TZ) {
   if (!d) return '—'
   const date = typeof d === 'string' ? new Date(d.length === 10 ? `${d}T12:00:00+03:00` : d) : d
   return new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: typeof d === 'string' && d.length === 10 ? TZ : tz }).format(date)
+}
+
+/** A visit day with its weekday and arrival window, e.g. "Sat, 14 Nov 2026, morning, 8am–12pm Kenya time". */
+export function fmtVisit(d: string | null | undefined, arrival?: string | null) {
+  if (!d) return 'Date to be confirmed'
+  const day = new Intl.DateTimeFormat('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', timeZone: TZ }).format(new Date(`${d.slice(0, 10)}T12:00:00+03:00`))
+  const at = arrivalLabel(arrival)
+  return at ? `${day}, ${at}` : day
 }
 
 export function fmtDateTime(d: Date | string | null | undefined, tz = TZ) {

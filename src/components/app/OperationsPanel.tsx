@@ -1,3 +1,5 @@
+import { sql } from '@/lib/db'
+import InvoiceAmountFields from './InvoiceAmountFields'
 import { projectOperations } from '@/lib/data/operations'
 import { staffOperationsAction } from '@/app/staff/operations-actions'
 import { clientOperationsAction } from '@/app/portal/operations-actions'
@@ -6,15 +8,21 @@ import { site } from '@/lib/site'
 import Uploader from './Uploader'
 import PaymentNoticeForm from './PaymentNoticeForm'
 import PaystackInvoiceActions from './PaystackInvoiceActions'
+import { paystackEnabled } from '@/lib/paystack'
 import { kes, fmtDate, fmtDateTime } from './format'
 
 // Billing and service for one project. Staff see every control; clients see their invoices, how to pay,
 // and only the sections that apply to them.
-export default async function OperationsPanel({ projectId, manager, section = 'all' }: { projectId: string; manager: boolean; section?: 'all' | 'billing' | 'agreement' | 'monitoring' | 'alerts' | 'settings' }) {
+export default async function OperationsPanel({ projectId, manager, finance = false, section = 'all' }: { projectId: string; manager: boolean; finance?: boolean; section?: 'all' | 'billing' | 'agreement' | 'monitoring' | 'alerts' | 'settings' }) {
   const data = await projectOperations(projectId)
+  const acceptedChanges=manager?await sql`select id,detail,amount_kes from workflow_cases where project_id=${projectId} and kind='scope_change' and status='accepted' and invoice_id is null`:[]
   const p = data.settings
   const hidden = (operation: string) => <><input type="hidden" name="projectId" value={projectId} /><input type="hidden" name="operation" value={operation} /></>
-  const owing = data.invoices.filter((i) => i.status === 'issued' && i.paid_kes < i.amount_kes)
+  const issued = data.invoices.filter(i => i.status === 'issued')
+  const owing = issued.filter(i => i.paid_kes < i.amount_kes && p.payment_status !== 'waived')
+  const creditInvoice = issued.find(i=>i.paid_kes>i.amount_kes)
+  const depositDue = owing.reduce((sum,i) => sum+Math.max(0,i.deposit_kes-i.paid_kes),0)
+  const balanceDue = owing.reduce((sum,i) => sum+Math.max(0,i.amount_kes-i.paid_kes),0)
   const show = (name: typeof section) => section === 'all' || section === name
 
   const nextInvoiceRef = data.nextInvoiceCode || 'AVB-1001'
@@ -22,7 +30,6 @@ export default async function OperationsPanel({ projectId, manager, section = 'a
   const invoiceHref = (i: { id: string }) => `/${manager ? 'staff' : 'portal'}/projects/${(p as any)?.code}/invoices/${i.id}`
   const invoicedKes = data.invoices.filter((i) => i.status === 'issued').reduce((s, i) => s + i.amount_kes, 0)
   const approvedTotal = (p as any)?.contract_value_kes || (p as any)?.proposal_total_kes || 0
-  const approvedDeposit = (p as any)?.proposal_deposit_kes ?? approvedTotal
   const defaultLabel = (p as any)?.title || 'Ground Verification'
   const defaultDueDate = new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10)
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Nairobi' })
@@ -30,7 +37,10 @@ export default async function OperationsPanel({ projectId, manager, section = 'a
   return <div className="space-y-6">
     {show('billing') && <section className="panel panel-pad space-y-4">
       <h2 className="text-lg">{manager ? 'Billing and receipts' : 'Invoices and payments'}</h2>
-      {manager && <p className="hint">Paystack payments are confirmed automatically. Record payments received outside checkout manually. Manage Paystack refunds in the Paystack dashboard; confirmed refunds sync automatically.</p>}
+      {manager && !finance && <p className="hint">An admin issues and changes invoices, confirms payments and handles refunds. Message an admin if something here needs to change.</p>}
+      {finance && <p className="hint">Paystack payments are confirmed automatically. Record payments received outside checkout manually. Manage Paystack refunds in the Paystack dashboard; confirmed refunds sync automatically.</p>}
+      {manager && issued.length>0&&<div className="grid gap-3 sm:grid-cols-3" aria-label="Project payment summary"><div className="rounded border border-line p-3"><p className="text-sm text-muted">Deposit still due</p><p className="text-xl font-semibold">{kes(depositDue)}</p><p className="hint">Before work starts</p></div><div className="rounded border border-line p-3"><p className="text-sm text-muted">Remaining after deposit</p><p className="text-xl font-semibold">{kes(balanceDue-depositDue)}</p><p className="hint">Before your final report opens</p></div><div className="rounded border border-line p-3"><p className="text-sm text-muted">Payments received</p><p className="text-xl font-semibold">{kes(issued.reduce((sum,i)=>sum+i.paid_kes,0))}</p><p className="hint">After recorded refunds</p></div></div>}
+      {p.payment_status==='waived'&&<p className="alert alert-info">Payment is waived. No payment is required.</p>}
       {!data.invoices.length && <p className="empty">{manager ? 'No invoice has been issued yet.' : 'No invoice yet. It appears here when you accept a proposal.'}</p>}
       {data.invoices.map((i) => {
         const balance = Math.max(0, i.amount_kes - i.paid_kes)
@@ -44,20 +54,32 @@ export default async function OperationsPanel({ projectId, manager, section = 'a
               <span className={`chip ${i.status === 'cancelled' ? 'chip--none' : balance === 0 ? 'chip--ok' : 'chip--warn'}`}>{i.status === 'cancelled' ? 'Cancelled' : balance === 0 ? 'Paid' : beforeVisit === 0 ? 'Deposit paid' : 'To pay'}</span>
             </span>
           </div>
+          {i.revision > 1 && <p className="text-sm text-ink-2">Revision {i.revision}: {i.revision_reason}</p>}
+          {i.paid_kes > i.amount_kes && i.status === 'issued' && <p className="alert alert-info">Overpaid by {kes(i.paid_kes-i.amount_kes)}. {manager ? 'Arrange and record a refund below.' : 'Your analyst will arrange a refund. No further payment is needed.'}</p>}
           {i.status === 'cancelled' && i.cancel_reason && <p className="text-sm text-muted">Cancelled: {i.cancel_reason}</p>}
-          <dl className="kv text-sm">
-            <dt>Total</dt><dd>{kes(i.amount_kes)}</dd>
-            <dt>Paid so far</dt><dd>{kes(i.paid_kes)}</dd>
-            {i.status === 'issued' && balance > 0 && <><dt>Still to pay</dt><dd>{kes(balance)}{beforeVisit >= balance ? ', due before the site visit' : beforeVisit > 0 ? `, of which ${kes(beforeVisit)} before the site visit` : ''}</dd></>}
-            {i.status === 'issued' && balance > 0 && i.due_on && <><dt>Due</dt><dd>{fmtDate(i.due_on)}{manager && i.reminder_sent_at ? ` · reminder sent ${fmtDate(i.reminder_sent_at)}` : ''}</dd></>}
-          </dl>
+          {finance&&<details><summary className="cursor-pointer text-sm">Apply accepted cancellation settlement</summary><form action={staffOperationsAction} className="space-y-3 mt-3">{hidden('settle_invoice')}<input type="hidden" name="invoiceId" value={i.id}/><label className="label">Retained charge, KES<input className="input" type="number" name="retained" min="0" max={i.amount_kes} required/></label><label className="label">Settlement reason<input className="input" name="reason" minLength={5} required/></label><p className="hint">Requires client acceptance of the settlement. Record the actual refund separately.</p><button className="btn btn-secondary btn-small">Apply retained charge</button></form></details>}
+            {manager ? (
+            <dl className="kv text-sm">
+              <dt>Total</dt><dd>{kes(i.amount_kes)}</dd>
+              <dt>Paid so far</dt><dd>{kes(i.paid_kes)}</dd>
+              {i.status === 'issued' && balance > 0 && <><dt>Still to pay</dt><dd>{kes(balance)}{beforeVisit >= balance ? ', due before the site visit' : beforeVisit > 0 ? `, of which ${kes(beforeVisit)} before the site visit` : ''}</dd></>}
+              {i.status === 'issued' && balance > 0 && i.due_on && <><dt>Due</dt><dd>{fmtDate(i.due_on)}{i.reminder_sent_at ? ` · reminder sent ${fmtDate(i.reminder_sent_at)}` : ''}</dd></>}
+            </dl>
+          ) : (
+            // Clients see one line: what it costs, what is paid, what is left and by when.
+            <p className="text-sm text-ink-2">
+              Total {kes(i.amount_kes)} · paid {kes(i.paid_kes)}
+              {i.status === 'issued' && balance > 0 && <> · <strong className="text-ink">{kes(balance)} to pay</strong>{beforeVisit > 0 && beforeVisit < balance ? ` (${kes(beforeVisit)} before the visit)` : ''}{i.due_on ? ` by ${fmtDate(i.due_on)}` : ''}</>}
+            </p>
+          )}
           <PaystackInvoiceActions invoiceId={i.id} balance={i.status === 'issued' ? balance : 0} depositDue={beforeVisit} manager={manager} waived={p.payment_status === 'waived'} />
-          {data.payments.filter((payment) => payment.invoice_id === i.id).map((payment) => <p key={payment.id} className="text-sm text-ink-2">{payment.kind === 'refund' ? 'Refund' : 'Payment received'}: {kes(payment.amount_kes)} · ref {payment.reference} · {fmtDateTime(payment.created_at)}</p>)}
+          {data.payments.filter((payment) => payment.invoice_id === i.id).map((payment) => <p key={payment.id} className="text-sm text-ink-2">{payment.kind === 'refund' ? 'Refund' : 'Paid'} {kes(payment.amount_kes)} · {fmtDate(payment.created_at)}{manager ? ` · ref ${payment.reference}` : ''}</p>)}
           <div className="flex flex-wrap items-center gap-x-4 gap-y-2 pt-1 text-sm">
+            {finance && i.status==='issued'&&<a href={`${invoiceHref(i)}?edit=1#edit-invoice`} className="btn btn-secondary btn-small no-underline">Edit invoice</a>}
             <a className="font-semibold" href={invoiceHref(i)}>{manager ? 'Preview invoice' : 'View invoice'}</a>
             <a href={`/api/invoices/${i.id}/pdf?download`}>Download PDF</a>
             {manager && i.status === 'issued' && <span className="text-muted">{i.sent_at ? `Emailed ${fmtDateTime(i.sent_at)}` : 'Not emailed yet'}</span>}
-            {manager && i.status === 'issued' && i.paid_kes === 0 && (
+            {finance && i.status === 'issued' && i.paid_kes === 0 && (
               <details className="inline-block">
                 <summary className="cursor-pointer text-xs text-bad hover:underline">Cancel invoice</summary>
                 <form action={staffOperationsAction} className="mt-2 space-y-2 rounded border border-bad/30 bg-bad/5 p-2.5">
@@ -74,14 +96,13 @@ export default async function OperationsPanel({ projectId, manager, section = 'a
           </div>
         </article>
       })}
-      {!manager && owing.length > 0 && <HowToPay invoices={owing.map((i) => i.code)} />}
       {data.notices.length > 0 && <div className="space-y-3">
         <h3 className="text-base">Payment notifications</h3>
         {data.notices.map(n => <article key={n.id} className="rounded border border-line p-3 space-y-2 text-sm">
           <p><strong>{n.invoice_code} · {kes(n.amount_kes)}</strong> · ref {n.reference}</p>
           <p>{n.status === 'pending' ? 'Awaiting payment confirmation by the team' : n.status === 'confirmed' ? 'Confirmed and recorded' : 'Needs attention'}{n.response ? ` · ${n.response}` : ''}</p>
           {n.note && <p className="text-muted">{n.note}</p>}
-          {manager && n.status === 'pending' && <>
+          {finance && n.status === 'pending' && <>
             <form action={staffOperationsAction} className="space-y-2">{hidden('payment')}
               <input type="hidden" name="noticeId" value={n.id} /><input type="hidden" name="invoiceId" value={n.invoice_id} /><input type="hidden" name="amount" value={n.amount_kes} /><input type="hidden" name="reference" value={n.reference} /><input type="hidden" name="kind" value="payment" />
               <label className="label">Confirm against bank or M-Pesa records<input className="input" name="note" required maxLength={2000} placeholder="Where and when you verified the funds" /></label>
@@ -92,13 +113,19 @@ export default async function OperationsPanel({ projectId, manager, section = 'a
           </>}
         </article>)}
       </div>}
-      {!manager && owing.length > 0 && <details className="rounded border border-line p-3">
-        <summary className="cursor-pointer font-semibold">I have paid</summary>
-        <div className="mt-3">
-          <PaymentNoticeForm action={clientOperationsAction} projectId={projectId} owing={owing.map((i) => ({ id: i.id, code: i.code, label: plainLabel(i), balance: Math.max(0, i.amount_kes - i.paid_kes) }))} />
+      {/* Bank and M-Pesa are the fallback to Paystack: instructions and "I have paid" together, out of the way. */}
+      {!manager && owing.length > 0 && <details className="rounded border border-line p-3" open={!paystackEnabled()}>
+        <summary className="cursor-pointer font-semibold">{paystackEnabled() ? 'Paying by bank transfer or M-Pesa instead?' : 'How to pay'}</summary>
+        <div className="mt-3 space-y-4">
+          <HowToPay invoices={owing.map((i) => i.code)} />
+          <div>
+            <h3 className="text-base">Already paid this way?</h3>
+            <p className="hint mb-2">Send us the transaction reference so we can confirm it.</p>
+            <PaymentNoticeForm action={clientOperationsAction} projectId={projectId} owing={owing.map((i) => ({ id: i.id, code: i.code, label: plainLabel(i), balance: Math.max(0, i.amount_kes - i.paid_kes) }))} />
+          </div>
         </div>
       </details>}
-      {manager && (
+      {finance && (
         <div className="space-y-4 pt-2">
           {data.invoices.length > 0 ? (
             <details className="rounded-xl border border-line bg-slate-50/50 p-4">
@@ -111,7 +138,7 @@ export default async function OperationsPanel({ projectId, manager, section = 'a
               <form action={staffOperationsAction} className="mt-4 space-y-4">
                 {hidden('invoice')}
                 <p className="text-xs text-muted">
-                  Use this only for additional work beyond the accepted proposal. The contract proposal of {kes(approvedTotal)} is already invoiced ({kes(invoicedKes)} issued).
+                  For discounts or corrections, use “Edit invoice / discount” above. Use a supplementary invoice only for additional agreed work. The contract proposal of {kes(approvedTotal)} is already invoiced ({kes(invoicedKes)} issued).
                 </p>
                 <div className="grid gap-3 sm:grid-cols-2">
                   <label className="label">
@@ -141,42 +168,10 @@ export default async function OperationsPanel({ projectId, manager, section = 'a
                     />
                   </label>
 
-                  <label className="label">
-                    Total KES
-                    <span className="opt block text-xs font-normal text-muted">
-                      Amount for extra work
-                    </span>
-                    <input
-                      className="input"
-                      name="amount"
-                      type="number"
-                      min="1"
-                      max="100000000"
-                      placeholder="e.g. 5000"
-                      required
-                    />
-                  </label>
-
-                  <label className="label">
-                    Required deposit KES
-                    <span className="opt block text-xs font-normal text-muted">
-                      Default 0 (deposit already fulfilled)
-                    </span>
-                    <input
-                      className="input"
-                      name="deposit"
-                      type="number"
-                      min="0"
-                      max="100000000"
-                      defaultValue="0"
-                      required
-                    />
-                  </label>
+                <InvoiceAmountFields />
                 </div>
 
-                <label className="check">
-                  <input type="checkbox" name="beyondContract" defaultChecked /> This is additional work beyond the accepted proposal
-                </label>
+                <label className="label">Client-approved additional work<select className="input" name="acceptedCaseId" required><option value="">Choose an accepted scope change</option>{acceptedChanges.map(c=><option key={c.id} value={c.id}>{kes(c.amount_kes)} · {String(c.detail).slice(0,80)}</option>)}</select><span className="hint">Create a scope change under Service & privacy and wait for client acceptance.</span></label>
                 <label className="check">
                   <input type="checkbox" name="send" defaultChecked /> Email the invoice to the client as a PDF now
                 </label>
@@ -228,37 +223,7 @@ export default async function OperationsPanel({ projectId, manager, section = 'a
                   />
                 </label>
 
-                <label className="label">
-                  Total KES
-                  <span className="opt block text-xs font-normal text-muted">
-                    Approved: {kes(approvedTotal)}
-                  </span>
-                  <input
-                    className="input"
-                    name="amount"
-                    type="number"
-                    min="1"
-                    max="100000000"
-                    defaultValue={approvedTotal || ''}
-                    required
-                  />
-                </label>
-
-                <label className="label">
-                  Required deposit KES
-                  <span className="opt block text-xs font-normal text-muted">
-                    Approved deposit: {kes(approvedDeposit)}
-                  </span>
-                  <input
-                    className="input"
-                    name="deposit"
-                    type="number"
-                    min="0"
-                    max="100000000"
-                    defaultValue={approvedDeposit ?? ''}
-                    required
-                  />
-                </label>
+                <InvoiceAmountFields initial={approvedTotal} />
               </div>
 
               <label className="check">
@@ -275,7 +240,7 @@ export default async function OperationsPanel({ projectId, manager, section = 'a
             </form>
           )}
 
-        {data.invoices.length > 0 && <form action={staffOperationsAction} className="rounded-xl border border-line bg-slate-50/50 p-4 space-y-4">{hidden('payment')}
+        {data.invoices.length > 0 && <form id="record-payment" action={staffOperationsAction} className="rounded-xl border border-line bg-slate-50/50 p-4 space-y-4">{hidden('payment')}
           <div className="border-b border-line/60 pb-3">
             <h3 className="text-sm font-semibold text-ink">Record payment or refund manually</h3>
             <p className="text-xs text-muted">
@@ -285,7 +250,7 @@ export default async function OperationsPanel({ projectId, manager, section = 'a
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="label">
               Invoice
-              <select className="input" name="invoiceId">
+              <select className="input" name="invoiceId" defaultValue={creditInvoice?.id}>
                 {data.invoices.filter((i) => i.status === 'issued').map((i) => {
                   const bal = Math.max(0, i.amount_kes - i.paid_kes)
                   return <option key={i.id} value={i.id}>{i.code} · {plainLabel(i)} ({kes(bal)} balance)</option>
@@ -294,7 +259,7 @@ export default async function OperationsPanel({ projectId, manager, section = 'a
             </label>
             <label className="label">
               Entry type
-              <select className="input" name="kind">
+              <select className="input" name="kind" defaultValue={creditInvoice ? 'refund' : 'payment'}>
                 <option value="payment">Payment received</option>
                 <option value="refund">Refund paid</option>
               </select>
@@ -343,13 +308,13 @@ export default async function OperationsPanel({ projectId, manager, section = 'a
     {show('monitoring') && (manager || p.monitoring_status !== 'inactive') && <section className="panel panel-pad space-y-3">
       <h2 className="text-lg">Recurring monitoring</h2>
       <p className="text-sm">{monitoringStatusLabels[p.monitoring_status] ?? p.monitoring_status}{p.monitoring_interval_days ? ` · a visit every ${p.monitoring_interval_days} days · ${kes(p.monitoring_fee_kes)} each` : ''}{p.next_cycle_on ? ` · next ${fmtDate(p.next_cycle_on)}` : ''}</p>
-      <p className="hint">Each visit has its own invoice. {manager ? 'Schedule the visit once it is paid and the scope is confirmed.' : 'We schedule the visit once it is paid.'}</p>
+      <p className="hint">Each visit has its own invoice. {manager ? 'Schedule once the 60% deposit is received and the scope is confirmed.' : 'Pay a 60% deposit before each visit. The remaining balance is due before that cycle’s report opens.'}</p>
       {p.monitoring_status === 'active' && (!p.monitoring_accepted_at || p.monitoring_accepted_version !== p.monitoring_plan_version) && <>
         <p className="alert alert-warn">{manager ? 'Waiting for the client to accept these terms. New cycles cannot be generated or dispatched yet.' : 'Review the fee and visit frequency above before accepting. Each cycle will be invoiced separately.'}</p>
         {!manager && <form action={clientOperationsAction} className="space-y-3">{hidden('monitoring_accept')}<input type="hidden" name="version" value={p.monitoring_plan_version} /><label className="check"><input type="checkbox" name="agree" required />I agree to {kes(p.monitoring_fee_kes)} per visit, every {p.monitoring_interval_days} days{p.monitoring_end_on ? ` until ${fmtDate(p.monitoring_end_on)}` : ', until I pause or cancel'}.</label><button className="btn btn-primary btn-small">Accept monitoring plan</button></form>}
       </>}
       {p.monitoring_accepted_at && p.monitoring_accepted_version === p.monitoring_plan_version && <p className="text-sm text-ok">Client accepted {fmtDateTime(p.monitoring_accepted_at)}.</p>}
-      {manager && <>
+      {finance && <>
         <form action={staffOperationsAction} className="grid gap-3 sm:grid-cols-2">{hidden('monitoring')}
           <label className="label">Plan status<select className="input" name="status" defaultValue={p.monitoring_status === 'inactive' ? 'active' : p.monitoring_status}>{['active', 'paused', 'cancelled'].map((s) => <option key={s} value={s}>{monitoringStatusLabels[s]}</option>)}</select></label>
           <label className="label">Days between visits<input className="input" type="number" name="interval" min="7" max="366" defaultValue={p.monitoring_interval_days ?? 30} required /></label>
@@ -362,7 +327,7 @@ export default async function OperationsPanel({ projectId, manager, section = 'a
       </>}
       {data.cycles.map((c) => <div key={c.id} className="flex flex-wrap items-center gap-3 text-sm"><span>{fmtDate(c.cycle_on)} · {c.inspection_code ?? (c.invoice_status === 'cancelled' ? `Invoice ${c.invoice_code} cancelled${c.invoice_cancel_reason ? ` (${c.invoice_cancel_reason})` : ''}` : 'Waiting for payment, then scheduling')}</span>
         {manager && !c.inspection_id && c.invoice_status !== 'cancelled' && <form action={staffOperationsAction}>{hidden('dispatch')}<input type="hidden" name="cycleId" value={c.id} /><button className="btn btn-secondary btn-xs" type="submit">Schedule cycle visit</button></form>}
-        {manager && !c.inspection_id && c.invoice_status === 'cancelled' && <form action={staffOperationsAction}>{hidden('reissue_cycle')}<input type="hidden" name="cycleId" value={c.id} /><button className="btn btn-secondary btn-xs" type="submit">Issue a new invoice for this cycle</button></form>}
+        {finance && !c.inspection_id && c.invoice_status === 'cancelled' && <form action={staffOperationsAction}>{hidden('reissue_cycle')}<input type="hidden" name="cycleId" value={c.id} /><button className="btn btn-secondary btn-xs" type="submit">Issue a new invoice for this cycle</button></form>}
       </div>)}
     </section>}
 
@@ -401,14 +366,8 @@ function HowToPay({ invoices }: { invoices: string[] }) {
   const { mpesaPaybill, bankDetails } = site.payment
   const reference = invoices.join(' or ')
   return (
-    <div className="space-y-3 rounded-lg border border-line bg-paper p-4 text-sm">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <h3 className="text-base font-semibold text-ink">How to pay</h3>
-        <span className="chip chip--neutral text-xs">Official channels only</span>
-      </div>
-      <p className="text-ink-2">
-        Use your invoice number (<strong>{reference}</strong>) as the transaction reference so the finance team can match your payment immediately.
-      </p>
+    <div className="space-y-3 text-sm">
+      <p className="text-ink-2">Use <strong>{reference}</strong> as the payment reference.</p>
       {mpesaPaybill || bankDetails ? (
         <div className="grid gap-3 sm:grid-cols-2">
           {mpesaPaybill && (
@@ -428,13 +387,10 @@ function HowToPay({ invoices }: { invoices: string[] }) {
         </div>
       ) : (
         <div className="rounded border border-line bg-surface p-3 text-ink-2">
-          <p>Bank wire and Lipa na M-Pesa payment details are issued with your official invoice document and sent to your email.</p>
-          <p className="mt-1">Always use your invoice number (<strong>{reference}</strong>) as the payment reference.</p>
+          The bank and M-Pesa details are on your invoice and in the email we sent you.
         </div>
       )}
-      <p className="text-xs text-muted">
-        Payments through portal checkout are confirmed automatically. Payments made outside checkout are confirmed by the team. AngaVeritas personnel will never ask you to transfer funds to a personal mobile number or personal bank account.
-      </p>
+      <p className="text-xs text-muted">We will never ask you to pay into a personal phone number or bank account.</p>
     </div>
   )
 }

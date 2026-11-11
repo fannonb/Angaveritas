@@ -21,7 +21,7 @@ export async function clientStats(clientId: string) {
 /** Deposits the client still owes before a visit can be booked, one row per invoice. Waived projects are excluded. */
 export async function clientDepositsDue(clientId: string) {
   return sql<{ project_code: string; project_title: string; invoice_code: string; due_kes: number; payment_notified: boolean }[]>`
-    select x.*, coalesce((select sum(amount_kes) from payment_notices where invoice_id=x.invoice_id and status='pending'),0)>=due_kes as payment_notified from (
+    select x.*, (coalesce((select sum(amount_kes) from payment_notices where invoice_id=x.invoice_id and status='pending'),0)>=due_kes or exists(select 1 from paystack_attempts a where a.invoice_id=x.invoice_id and ((a.status in ('initializing','pending') and a.created_at > now() - interval '30 minutes') or (a.status='review' and a.reviewed_at is null)))) as payment_notified from (
       select i.id invoice_id,p.code as project_code, p.title as project_title, i.code as invoice_code, i.created_at,
         i.deposit_kes - coalesce((select sum(case when kind = 'payment' then amount_kes else -amount_kes end)::int from payments where invoice_id = i.id), 0) as due_kes
       from invoices i join projects p on p.id = i.project_id
@@ -35,9 +35,22 @@ export async function clientReportsToRead(clientId: string) {
     select r.id, p.code as project_code, p.title as project_title
     from reports r join projects p on p.id = r.project_id
     where p.client_id = ${clientId} and r.status = 'published'
-      and client_reports_unlocked(p.id)
+      and work_order_unlocked(r.work_order_id)
       and not exists(select 1 from report_reads rr where rr.report_id=r.id and rr.user_id=${clientId})
     order by r.published_at desc limit 5`
+}
+
+/** Final balances that block delivery, including completed projects with money still due. */
+export async function clientBalancesDue(clientId: string) {
+  return sql<{project_code:string; project_title:string; invoice_code:string; due_kes:number; payment_notified:boolean}[]>`
+    select x.*, (coalesce((select sum(amount_kes) from payment_notices where invoice_id=x.invoice_id and status='pending'),0)>=due_kes or exists(select 1 from paystack_attempts a where a.invoice_id=x.invoice_id and ((a.status in ('initializing','pending') and a.created_at > now() - interval '30 minutes') or (a.status='review' and a.reviewed_at is null)))) as payment_notified
+    from (
+      select i.id invoice_id,p.code project_code,p.title project_title,i.code invoice_code,
+        i.amount_kes-coalesce((select sum(case when kind='payment' then amount_kes else -amount_kes end)::int from payments where invoice_id=i.id),0) due_kes
+      from invoices i join projects p on p.id=i.project_id
+      where p.client_id=${clientId} and i.status='issued' and p.payment_status<>'waived'
+        and (p.stage in ('delivered','monitoring','closed') or exists(select 1 from reports r where r.project_id=p.id and r.status='published'))
+    ) x where due_kes>0 order by invoice_code`
 }
 
 /** One page of the client's visible activity, newest first. */

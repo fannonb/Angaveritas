@@ -16,9 +16,10 @@ describe('required account location', () => {
     expect(accountLocationSchema.safeParse(value).success).toBe(false)
   })
   it('does not accept the old optional free-text field as a complete location', () => {
-    const account = { fullName: 'Location Test', email: 'location@test.invalid', phone: '+254712345678', password: 'Location-test-2026', consent: true, basedIn: 'Nairobi' }
+    const account = { fullName: 'Location Test', email: 'location@test.invalid', phone: '+254712345678', whatsapp: '+254712345678', password: 'Location-test-2026', consent: true, basedIn: 'Nairobi' }
     expect(registerSchema.safeParse(account).success).toBe(false)
     expect(registerSchema.safeParse({ ...account, countryCode: 'KE', regionCode: '30' }).success).toBe(true)
+    expect(registerSchema.safeParse({ ...account, whatsapp: '', countryCode: 'KE', regionCode: '30' }).success).toBe(false)
     expect(requestSubmitSchema.safeParse({ kind: 'custom', location: null, brief: { title: 'Location check', description: 'Validate registration through the calculator.' }, account: { ...account, mode: 'register', countryCode: 'KE', regionCode: 'CA' } }).success).toBe(false)
   })
   it('has stable unique country/region codes and at least one selectable area', () => {

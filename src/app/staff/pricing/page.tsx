@@ -19,7 +19,7 @@ const examples: [string, number][] = [
 ]
 
 export default async function PricingPage() {
-  const user = await requireStaff(['analyst', 'admin'])
+  const user = await requireStaff(['admin'])
   const [active, versions, settings] = await Promise.all([getActivePricing(), listPricingVersions(), getSiteSettings()])
   return (
     <div className="space-y-6">

@@ -12,16 +12,12 @@ export default async function LoginPage({ searchParams: searchParamsPromise }: {
   if (user) redirect(homeFor(user))
   return (
     <div className="panel panel-pad space-y-5">
-      <div>
-        <h1 className="app-title">Sign in</h1>
-        <p className="mt-1 text-ink-2">Clients and AngaVeritas staff sign in here.</p>
-      </div>
+      <h1 className="app-title">Sign in</h1>
       {searchParams.signed_out && <p className="alert alert-ok">You have signed out.</p>}
       {searchParams.verified && <p className="alert alert-ok">Email confirmed. Please sign in.</p>}
       <LoginForm next={searchParams.next} />
-      <p className="border-0 border-t border-solid border-line pt-4 text-sm text-ink-2">
-        New to AngaVeritas? <Link href={`/register${searchParams.next ? `?next=${encodeURIComponent(searchParams.next)}` : ''}`}>Create an account</Link> or{' '}
-        <Link href="/estimate">start with an estimate</Link>.
+      <p className="text-center text-sm text-ink-2">
+        New here? <Link href={`/register${searchParams.next ? `?next=${encodeURIComponent(searchParams.next)}` : ''}`}>Create an account</Link>
       </p>
     </div>
   )

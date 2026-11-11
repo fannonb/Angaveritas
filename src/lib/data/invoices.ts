@@ -11,7 +11,12 @@ export type InvoiceDoc = {
   depositKes: number
   paidKes: number
   balanceKes: number
+  dueAmountKes: number
   depositDueKes: number
+  creditKes: number
+  revision: number
+  revisionReason: string | null
+  approvedAmountKes: number
   issuedOn: Date
   dueOn: string | null
   sentAt: Date | null
@@ -33,7 +38,7 @@ export type InvoiceDoc = {
 export async function invoiceDocument(invoiceId: string, projectId: string): Promise<InvoiceDoc | null> {
   if (!/^[0-9a-f-]{36}$/i.test(invoiceId)) return null
   const [row] = await sql`
-    select i.*, p.code project_code, p.title project_title, p.service_name, p.location_label, p.client_id,
+    select i.*, invoice_due_on(i.id) effective_due_on,invoice_due_amount(i.id) due_amount, p.code project_code, p.title project_title, p.service_name, p.location_label, p.client_id,
       u.full_name client_name, u.email client_email, u.phone client_phone, u.based_in client_based_in,
       pr.payment_terms, pr.line_items proposal_lines
     from invoices i
@@ -69,8 +74,13 @@ export async function invoiceDocument(invoiceId: string, projectId: string): Pro
     paidKes,
     balanceKes,
     depositDueKes,
+    dueAmountKes: row.due_amount,
+    creditKes: Math.max(0, paidKes - row.amount_kes),
+    revision: row.revision,
+    revisionReason: row.revision_reason,
+    approvedAmountKes: row.approved_amount_kes,
     issuedOn: row.created_at,
-    dueOn: row.due_on ? new Date(row.due_on).toISOString().slice(0, 10) : null,
+    dueOn: row.effective_due_on ? new Date(row.effective_due_on).toISOString().slice(0, 10) : null,
     sentAt: row.sent_at,
     cancelledAt: row.cancelled_at,
     cancelReason: row.cancel_reason,

@@ -1,7 +1,9 @@
 import Link from 'next/link'
+import type { ProgressStep } from '@/lib/workflow'
 import { Chip } from '@/components/site/ui'
 import { kenyaOutline, mapPoint } from '@/components/site/ui'
 import {
+  arrivalWindows,
   clientStageLabels,
   confidenceLabels,
   findingStatusLabels,
@@ -155,5 +157,52 @@ export function Tabs({ tabs, active, className = '' }: { tabs: { key: string; la
         </Link>
       ))}
     </nav>
+  )
+}
+
+/** Staff choose when the field team expects to arrive; the client sees it with the visit date. An exact time wins over the window. */
+export function ArrivalFields({ value }: { value?: string | null }) {
+  const named = value && value in arrivalWindows ? value : ''
+  const exact = value && !named ? value : ''
+  return (
+    <div className="grid grid-cols-2 gap-3">
+      <label className="label">Arrival
+        <select className="input" name="arrivalWindow" defaultValue={named}>
+          <option value="">Not set</option>
+          {Object.entries(arrivalWindows).map(([code, label]) => <option key={code} value={code}>{label[0].toUpperCase() + label.slice(1)}</option>)}
+        </select>
+      </label>
+      <label className="label">or exact time<input className="input" type="time" name="arrivalTime" defaultValue={exact} step={900} /></label>
+    </div>
+  )
+}
+
+/** Where a project stands: a bar for how far along it is, the step that is waiting and on whom, then every step. */
+export function ProjectProgress({ steps, viewer }: { steps: ProgressStep[]; viewer: 'client' | 'staff' }) {
+  const done = steps.filter((s) => s.state === 'done').length
+  const current = steps.find((s) => s.state === 'current')
+  const who = (o: ProgressStep['owner']) => viewer === 'client' ? (o === 'client' ? 'Waiting on you' : 'With our team') : (o === 'client' ? 'Waiting on the client' : 'Waiting on the team')
+  const pct = Math.round((done / steps.length) * 100)
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <p className="text-sm">
+          {current ? <><span className="text-muted">Now: </span><strong>{current.label}</strong><span className={`ml-2 chip chip--plain ${current.owner === 'client' ? 'chip--warn' : 'chip--none'}`}>{who(current.owner)}</span></> : <strong>All steps complete</strong>}
+        </p>
+        <p className="text-sm text-muted">{done} of {steps.length} done</p>
+      </div>
+      <span className="meter block" role="progressbar" aria-valuenow={done} aria-valuemin={0} aria-valuemax={steps.length} aria-label={`${done} of ${steps.length} steps done`}><span style={{ width: `${pct}%` }} /></span>
+      <ol className="grid gap-x-5 gap-y-2.5 sm:grid-cols-2 lg:grid-cols-5">
+        {steps.map((s) => (
+          <li key={s.key} className="flex items-start gap-2 text-sm" aria-current={s.state === 'current' ? 'step' : undefined}>
+            <span aria-hidden className={`mt-0.5 grid h-4 w-4 shrink-0 place-items-center rounded-full text-[0.6rem] font-bold ${s.state === 'done' ? 'bg-ink text-white' : s.state === 'current' ? 'border-2 border-gold' : 'border border-line-strong'}`}>{s.state === 'done' ? '✓' : ''}</span>
+            <span className="min-w-0">
+              <span className={`block leading-snug ${s.state === 'current' ? 'font-semibold text-ink' : s.state === 'done' ? 'text-ink-2' : 'text-muted'}`}>{s.label}<span className="sr-only">{s.state === 'done' ? ': done' : s.state === 'current' ? ': current step' : ': to come'}</span></span>
+              {s.detail && <span className="block text-xs text-muted">{s.detail}</span>}
+            </span>
+          </li>
+        ))}
+      </ol>
+    </div>
   )
 }

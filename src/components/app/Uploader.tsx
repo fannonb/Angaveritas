@@ -2,6 +2,7 @@
 
 import { useRouter } from 'next/navigation'
 import { useEffect, useRef, useState } from 'react'
+import { readUploadQueue, saveUploadQueue } from '@/lib/device-upload-queue'
 
 type Item = { name: string; file: File | null; caption: string; drone: boolean; progress: number; ticket?: { fileId: string; upload: { url: string; headers?: Record<string,string> } }; bytesSent?: boolean; state: 'waiting' | 'uploading' | 'done' | 'error'; note?: string }
 
@@ -48,6 +49,25 @@ export default function Uploader({
   const [caption, setCaption] = useState('')
   const [drone, setDrone] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [recover,setRecover]=useState(false)
+  const [recoveryReady,setRecoveryReady]=useState(false)
+  const [recoveryError,setRecoveryError]=useState('')
+  const storageKey=`${projectId}:${inspectionId??''}:${category}`
+  const writes=useRef(Promise.resolve())
+  useEffect(()=>{
+    let alive=true
+    readUploadQueue<Item[]>(storageKey).then(saved=>{
+      if(!alive)return
+      if(saved?.length){setRecover(true);setItems(saved.map(i=>({...i,state:'error',note:'Recovered on this device. Retry when connected.'})))}
+      setRecoveryReady(true)
+    }).catch(()=>{if(alive){setRecoveryReady(true);setRecoveryError('Device recovery is unavailable. Keep this page open until uploads finish.')}})
+    return()=>{alive=false}
+  },[storageKey])
+  useEffect(()=>{
+    if(!recoveryReady)return
+    const pending=items.filter(i=>i.state!=='done')
+    writes.current=writes.current.then(()=>saveUploadQueue(storageKey,recover&&pending.length?pending:null)).catch(()=>setRecoveryError('Could not save the device queue. Storage may be full. Keep this page open.'))
+  },[items,recover,recoveryReady,storageKey])
 
   const update = (i: number, patch: Partial<Item>) => setItems((xs) => xs.map((x, j) => (j === i ? { ...x, ...patch } : x)))
   const unsaved = items.filter(i => i.state !== 'done').length
@@ -64,6 +84,15 @@ export default function Uploader({
     update(i, { state: 'uploading', note:undefined })
     try {
       let ticket = item.ticket
+      if(ticket) {
+        const response=await fetch(`/api/files/${ticket.fileId}/retry`,{method:'POST'})
+        const refreshed=await response.json()
+        if(!response.ok)throw new Error(refreshed.error||'Could not resume upload.')
+        if(refreshed.ready){update(i,{state:'done',file:null,note:refreshed.file.evidence_code});return}
+        ticket={fileId:refreshed.fileId,upload:refreshed.upload}
+        item={...item,bytesSent:refreshed.bytesSent}
+        update(i,{ticket,bytesSent:refreshed.bytesSent})
+      }
       if (!ticket) {
       const start = await fetch('/api/files', {
         method: 'POST',
@@ -113,6 +142,9 @@ export default function Uploader({
 
   return (
     <div className="rounded-lg border border-dashed border-line-strong bg-white p-4" data-pending-uploads={unsaved}>
+      <label className="check mb-3"><input type="checkbox" checked={recover} disabled={!recoveryReady||busy} onChange={e=>setRecover(e.target.checked)}/>Keep unfinished uploads on this device so I can retry after closing the tab.</label>
+      {recover&&<p className="hint mb-3">Use a trusted device. Files remain here until uploaded or removed. Reopen this project and choose Retry to continue.</p>}
+      {recoveryError&&<p className="alert alert-warn" role="alert">{recoveryError}</p>}
       <div className="flex flex-wrap items-end gap-3">
         <label className="label min-w-[12rem] flex-1">
           Caption <span className="opt">(optional, applies to the next upload)</span>
@@ -146,7 +178,7 @@ export default function Uploader({
                 {it.state === 'waiting' ? 'Waiting' : it.state === 'uploading' ? it.note ?? `Uploading ${it.progress}%` : it.state === 'done' ? `Saved${it.note ? ` · ${it.note}` : ''}` : it.note}
               </span>
               {it.state === 'uploading' && <progress className="w-full" max={100} value={it.progress} aria-label={`Upload progress for ${it.name}`} />}
-              {it.state === 'error' && <button type="button" className="btn btn-secondary btn-xs" disabled={busy} onClick={() => retry(i)}>Retry {it.name}</button>}
+              {it.state === 'error' && <><button type="button" className="btn btn-secondary btn-xs" disabled={busy} onClick={() => retry(i)}>Retry {it.name}</button><button type="button" className="linkish text-sm" disabled={busy} onClick={()=>setItems(xs=>xs.filter((_,at)=>at!==i))}>Remove from device queue</button></>}
             </li>
           ))}
         </ul>

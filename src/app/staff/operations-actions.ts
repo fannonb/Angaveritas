@@ -3,11 +3,35 @@ import { redirect } from 'next/navigation'
 import { revalidatePath } from 'next/cache'
 import { requireStaff } from '@/lib/auth/session'
 import { projectFor } from '@/lib/data/projects'
-import { cancelInvoice, issueInvoice, recordPayment, configureMonitoring, dispatchMonitoringCycle, generateMonitoringCycles, reissueCycleInvoice, reopenProject, resolveServiceRequest } from '@/lib/data/operations'
+import { cancelInvoice, issueInvoice, reviseInvoice, recordPayment, configureMonitoring, dispatchMonitoringCycle, generateMonitoringCycles, reissueCycleInvoice, reopenProject, resolveServiceRequest } from '@/lib/data/operations'
+import { settleCancellationInvoice } from '@/lib/data/engagements'
+import { requiredDeposit } from '@/lib/billing'
 import { emailInvoice } from '@/lib/invoice-send'
 import { sql, withActor } from '@/lib/db'
 import { logEvent, notifyTeam, notifyUser } from '@/lib/activity'
 import { formText } from '@/lib/validation'
+
+const adminOperations = ['settle_invoice', 'invoice', 'payment', 'revise_invoice', 'cancel_invoice', 'decline_notice', 'monitoring', 'cycles', 'reissue_cycle', 'reopen_project']
+
+/** Return validation failures to the editor so a failed save keeps the user's changes. */
+export async function saveInvoiceRevisionAction(_: {error:string} | null, form:FormData): Promise<{error:string} | null> {
+  const user=await requireStaff(['admin'])
+  const access=await projectFor(user,String(form.get('projectId') ?? ''))
+  if(!access?.canManage)return {error:'Project not found.'}
+  const p=access.project
+  const text=(key:string)=>formText(form,key,2000) ?? ''
+  try {
+    const amounts=form.getAll('lineAmount'), details=form.getAll('lineDetail')
+    await reviseInvoice(p.id,user.id,{
+      invoiceId:text('invoiceId'),revision:Number(text('revision')),label:text('label'),dueOn:text('dueOn')||null,reason:text('reason'),
+      lines:form.getAll('lineLabel').map((label,i)=>({label:String(label).trim(),amount:Number(amounts[i]),detail:String(details[i]??'').trim()||undefined})),
+    })
+  } catch(error) {return {error:error instanceof Error ? error.message : 'Could not save the invoice. Please try again.'}}
+  revalidatePath(`/staff/projects/${p.code}`)
+  revalidatePath(`/portal/projects/${p.code}`)
+  revalidatePath('/staff');revalidatePath('/portal');revalidatePath('/portal/payments')
+  redirect(`/staff/projects/${p.code}/invoices/${text('invoiceId')}?saved=1`)
+}
 export async function staffOperationsAction(form: FormData) {
   const user = await requireStaff(['analyst','admin'])
   const access = await projectFor(user,String(form.get('projectId') ?? ''))
@@ -15,11 +39,14 @@ export async function staffOperationsAction(form: FormData) {
   const p = access.project
   const text = (key: string) => formText(form,key,2000) ?? ''
   const num = (key: string) => Number(text(key))
+  // Money and commitments stay with admins: analysts deliver the work, admins invoice, take payment and reopen.
+  if (user.role !== 'admin' && adminOperations.includes(text('operation'))) redirect(`/staff/projects/${p.code}?tab=operations&error=${encodeURIComponent('Only an admin can change invoices, payments or monitoring fees, or reopen a project.')}`)
   const returnTab = text('operation') === 'nda' ? 'agreement' : ['monitoring','cycles','dispatch','reissue_cycle'].includes(text('operation')) ? 'monitoring' : ['resolve','reopen_project'].includes(text('operation')) ? 'settings' : text('operation') === 'alert' ? 'alerts' : 'operations'
   try {
     switch (text('operation')) {
+      case 'settle_invoice': await settleCancellationInvoice(p.id,user.id,text('invoiceId'),num('retained'),text('reason')); break
       case 'invoice': {
-        const id = await issueInvoice(p.id,user.id,{label:text('label'),amount:num('amount'),deposit:num('deposit'),dueOn:text('dueOn') || null,beyondContract:form.get('beyondContract') === 'on'})
+        const id = await issueInvoice(p.id,user.id,{label:text('label'),amount:num('amount'),deposit:requiredDeposit(num('amount')),dueOn:text('dueOn') || null,acceptedCaseId:text('acceptedCaseId')||undefined})
         if (form.get('send') === 'on') await emailInvoice(id,p.id,user.id,'issued')
         break
       }
@@ -34,6 +61,16 @@ export async function staffOperationsAction(form: FormData) {
         break
       }
       case 'send_invoice': await emailInvoice(text('invoiceId'),p.id,user.id,'resend'); break
+      case 'revise_invoice': {
+        const labels = form.getAll('lineLabel')
+        const amounts = form.getAll('lineAmount')
+        const details = form.getAll('lineDetail')
+        await reviseInvoice(p.id,user.id,{
+          invoiceId:text('invoiceId'), revision:num('revision'), label:text('label'), dueOn:text('dueOn') || null, reason:text('reason'),
+          lines:labels.map((label,i) => ({label:String(label).trim(),amount:Number(amounts[i]),detail:String(details[i] ?? '').trim() || undefined})),
+        })
+        break
+      }
       case 'cancel_invoice': {
         const [invoice] = await sql`select code from invoices where id=${text('invoiceId')} and project_id=${p.id}`
         // Once a report is published, cancelling an unpaid invoice releases it like a waiver does.
@@ -102,6 +139,8 @@ Nothing is owed on this invoice.`,href:`/portal/projects/${p.code}?tab=operation
   }
   revalidatePath(`/staff/projects/${p.code}`); revalidatePath(`/portal/projects/${p.code}`)
   revalidatePath('/staff')
+  revalidatePath('/portal')
+  revalidatePath('/portal/payments')
   // The invoice preview page sends people back to itself; only that path is accepted.
   const back = text('returnTo')
   if (back.startsWith(`/staff/projects/${p.code}/invoices/`) && /^[\w/-]+$/.test(back)) redirect(`${back}?saved=1`)

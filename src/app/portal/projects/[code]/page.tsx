@@ -1,24 +1,25 @@
-import { briefProfile, briefStageLabels } from '@/lib/service-briefs'
+import EngagementPanel from '@/components/app/EngagementPanel'
+import { briefProfile } from '@/lib/service-briefs'
 import OperationsPanel from '@/components/app/OperationsPanel'
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
-import { ConfidenceTag, FindingChip, HealthChip, InspectionChip, ReportChip, StageChip, StageTracker, Tabs, Timeline } from '@/components/app/bits'
+import { ConfidenceTag, FindingChip, HealthChip, InspectionChip, ProjectProgress, ReportChip, Tabs, Timeline } from '@/components/app/bits'
 import EvidenceGallery, { DocumentList } from '@/components/app/EvidenceGallery'
-import { fmtDate, kes, relativeDays } from '@/components/app/format'
+import { fmtDate, fmtVisit, kes, relativeDays } from '@/components/app/format'
 import Messages from '@/components/app/Messages'
 import Uploader from '@/components/app/Uploader'
-import VisitReadiness from '@/components/app/VisitReadiness'
+import VisitPlan, { showVisitPlan } from '@/components/app/VisitPlan'
 import { requireClient } from '@/lib/auth/session'
 import { listProjectFiles, scanningEnabled } from '@/lib/data/files'
 import { listInspections, listProjectFindings } from '@/lib/data/inspections'
 import { listMessages, markRead } from '@/lib/data/messages'
-import { projectBalanceDue, projectDepositDue, reportLock } from '@/lib/data/operations'
+import { projectBalanceDue, projectDepositDue, projectPaymentPending, reportLock, unpaidInvoices } from '@/lib/data/operations'
 import CompleteProjectCard from '@/components/app/CompleteProjectCard'
 import { listContacts, projectByCodeFor, projectEvents } from '@/lib/data/projects'
 import { listReports } from '@/lib/data/reports'
 import { overallStatusLabels, paymentStatusLabels } from '@/lib/labels'
 import { site } from '@/lib/site'
-import { clientNextStep } from '@/lib/workflow'
+import { clientNextStep, projectProgress } from '@/lib/workflow'
 import { addContactAction, clientMessageAction, removeContactAction } from '../../actions'
 import OnboardingForm from './OnboardingForm'
 
@@ -38,29 +39,86 @@ export default async function ProjectPage({ params: paramsPromise, searchParams:
   if (!access) notFound()
   const p = access.project
   const profile = briefProfile(p)
-  const journeyLabels = briefStageLabels(profile)
   const wanted = moved[searchParams.tab ?? ''] ?? searchParams.tab ?? ''
   const tab: Tab = (TABS as readonly string[]).includes(wanted) ? (wanted as Tab) : 'overview'
 
   const lock = await reportLock(p.id)
   // Findings and evidence are the substance of the report, so they stay hidden until the balance is paid.
-  const [inspections, findings, reports, evidence, documents, contacts, messages, events, deposit, balance] = await Promise.all([
+  const [inspections, findings, reports, evidence, documents, contacts, messages, events, deposit, balance, pendingInvoice] = await Promise.all([
     listInspections(p.id),
-    lock ? [] : listProjectFindings(p.id, true),
+    listProjectFindings(p.id, true),
     listReports(p.id, true),
-    lock ? [] : listProjectFiles(p.id, { clientView: true, category: 'evidence' }),
+    listProjectFiles(p.id, { clientView: true, category: 'evidence' }),
     listProjectFiles(p.id, { clientView: true, category: 'client_document' }),
     listContacts(p.id),
     listMessages({ projectId: p.id }, false),
     projectEvents(p.id, true, p.request_id),
     projectDepositDue(p.id),
     projectBalanceDue(p.id),
+    projectPaymentPending(p.id),
   ])
+  const owedKes = (await unpaidInvoices(p.id)).reduce((s, u) => s + u.unpaid_kes, 0)
   if (tab === 'messages') await markRead({ projectId: p.id }, user.id)
   const visibleInspections = inspections.filter((i) => i.status !== 'cancelled')
   const tz = user.timezone
   const href = (t: Tab) => `/portal/projects/${p.code}?tab=${t}`
-  const next = clientNextStep(p, inspections, reports, deposit ? { amount: kes(deposit.due_kes), invoice: deposit.code, paymentNotified:deposit.payment_notified } : null, (d) => fmtDate(d, tz), balance ? { amount: kes(balance.total), invoice: balance.codes } : null, lock ? { amount: kes(lock.owedKes), invoice: lock.codes } : null)
+  const next = clientNextStep(p, inspections.filter(i=>i.work_order_id===p.active_work_order_id), reports.filter(r=>r.work_order_id===p.active_work_order_id), deposit ? { amount: kes(deposit.due_kes), invoice: deposit.code, paymentNotified:deposit.payment_notified } : null, (d) => fmtDate(d, tz), balance ? { amount: kes(balance.total), invoice: balance.codes } : null, lock ? { amount: kes(lock.owedKes), invoice: lock.codes } : null, pendingInvoice)
+  const progress = projectProgress(p, inspections.filter(i=>i.work_order_id===p.active_work_order_id), reports.filter(r=>r.work_order_id===p.active_work_order_id), owedKes, (d) => fmtDate(d, tz))
+  // The brief is fixed once fieldwork starts.
+  const briefLocked = !['onboarding', 'planning'].includes(p.stage)
+  // The next step points at the tab already on screen, so the card needs no button.
+  const here = next.action?.href === href(tab)
+  const peopleStep = (
+    <div className="space-y-4">
+      <div>
+        <h3 className="text-base font-semibold">{profile.people}</h3>
+        <p className="hint">{profile.peopleHint}</p>
+      </div>
+      {contacts.length > 0 && (
+        <ul className="divide-y divide-line">
+          {contacts.map((c) => (
+            <li key={c.id} className="flex items-start justify-between gap-3 py-3 text-sm">
+              <span>
+                <strong>{c.name}</strong>{c.role ? ` · ${c.role}` : ''}
+                <span className="block text-ink-2">{[c.phone, c.email].filter(Boolean).join(' · ')}</span>
+                {c.notes && <span className="block text-muted">{c.notes}</span>}
+                {!c.may_contact && <span className="block text-warn">Do not contact without asking you first</span>}
+              </span>
+              <form action={removeContactAction}>
+                <input type="hidden" name="projectId" value={p.id} />
+                <input type="hidden" name="contactId" value={c.id} />
+                <button className="linkish text-muted" type="submit">Remove</button>
+              </form>
+            </li>
+          ))}
+        </ul>
+      )}
+      <details>
+        <summary className="cursor-pointer text-sm font-semibold">Add a person</summary>
+        <form action={addContactAction} className="mt-3 space-y-3">
+          <input type="hidden" name="projectId" value={p.id} />
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="label">Name<input className="input" name="name" required maxLength={120} /></label>
+            <label className="label">Role<input className="input" name="role" maxLength={120} placeholder="e.g. Contractor" /></label>
+            <label className="label">Phone<input className="input" name="phone" type="tel" maxLength={40} /></label>
+            <label className="label">Email<input className="input" name="email" type="email" maxLength={160} /></label>
+          </div>
+          <label className="label">Notes <span className="opt">(optional)</span><input className="input" name="notes" maxLength={1000} /></label>
+          <label className="check"><input type="checkbox" name="mayContact" defaultChecked /> AngaVeritas may contact this person directly</label>
+          <button className="btn btn-secondary btn-small" type="submit">Add person</button>
+        </form>
+      </details>
+    </div>
+  )
+  const documentsStep = (
+    <div className="space-y-3">
+      <h3 className="text-base font-semibold">Anything to attach? (optional)</h3>
+      <p className="hint">Helpful documents: share what you have. These do not block sending your brief.</p>
+      <ul className="list-disc pl-5 text-sm text-ink-2 space-y-2">{profile.documents.map(item => <li key={item}>{item}</li>)}</ul>
+      <Link className="btn btn-secondary btn-small" href={href('files')}>Add or view documents in Files</Link>
+      <DocumentList files={documents} tz={tz} clientView />
+    </div>
+  )
 
   return (
     <div className="space-y-6">
@@ -87,8 +145,7 @@ export default async function ProjectPage({ params: paramsPromise, searchParams:
           )}
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <HealthChip health={p.health} />
-          <StageChip stage={p.stage} client label={journeyLabels[p.stage]} />
+          {p.health !== 'not_assessed' && <HealthChip health={p.health} />}
         </div>
       </div>
 
@@ -96,52 +153,53 @@ export default async function ProjectPage({ params: paramsPromise, searchParams:
       {searchParams.onboarded && <p className="alert alert-ok"><strong>Thank you, we have your {profile.tab.toLowerCase()}.</strong> Your analyst will review the brief and confirm the next steps.</p>}
 
       <section className="panel panel-pad space-y-4" aria-label="Progress">
-        <StageTracker stage={p.stage} retainer={p.engagement === 'retainer'} client labels={journeyLabels} />
-        {tab === 'overview' && (
-          <div className="flex flex-wrap items-center justify-between gap-3 border-0 border-t border-solid border-line pt-4">
+        <ProjectProgress steps={progress} viewer="client" />
+        <div className="flex flex-wrap items-center justify-between gap-3 border-0 border-t border-solid border-line pt-4">
             <div>
-              <p className="next-step__label">What happens next</p>
+              <p className="next-step__label">{next.action ? 'Your next step' : 'With our team · no action needed'}</p>
               <p className="next-step__title">{next.title}</p>
-              <p className="next-step__text">{next.text}</p>
+              {!(here && tab === 'onboarding') && <p className="next-step__text">{next.text}</p>}
             </div>
-            {next.action && next.action.href !== href(tab) && <Link className="btn btn-primary btn-small" href={next.action.href}>{next.action.label}</Link>}
-          </div>
-        )}
+            {next.action && !here && <Link className="btn btn-primary btn-small" href={next.action.href}>{next.action.label}</Link>}
+        </div>
       </section>
 
-      <Tabs
-        className="client-project-tabs"
-        active={tab === 'agreement' || tab === 'monitoring' || tab === 'settings' ? '' : tab}
-        tabs={[
-          { key: 'overview', label: 'Summary', href: href('overview') },
-          { key: 'onboarding', label: profile.tab, href: href('onboarding') },
-          { key: 'reports', label: 'Findings & reports', href: href('reports'), count: reports.length || undefined },
-          { key: 'files', label: 'Files', href: href('files'), count: (evidence.length + documents.length) || undefined },
-          { key: 'operations', label: 'Payments', href: href('operations'), count: (deposit && !deposit.payment_notified) || (!deposit && balance) ? 1 : undefined },
-          { key: 'messages', label: 'Messages', href: href('messages') },
-        ]}
-      />
-      <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm">
-        {p.nda_status !== 'none' && (
-          <Link href={href('agreement')} className={tab === 'agreement' ? 'font-semibold text-ink underline' : 'text-muted hover:text-ink'}>
-            Confidentiality agreement{p.nda_status === 'prepared' ? ' (action needed)' : ''}
+      <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+        <Tabs
+          className="client-project-tabs lg:min-w-0 lg:flex-1"
+          active={tab === 'agreement' || tab === 'monitoring' || tab === 'settings' ? '' : tab}
+          tabs={[
+            { key: 'overview', label: 'Summary', href: href('overview') },
+            { key: 'onboarding', label: profile.tab, href: href('onboarding') },
+            { key: 'reports', label: 'Findings & reports', href: href('reports'), count: reports.length || undefined },
+            { key: 'files', label: 'Files', href: href('files'), count: (evidence.length + documents.length) || undefined },
+            { key: 'operations', label: 'Payments', href: href('operations'), count: (deposit && !deposit.payment_notified) || (!deposit && balance) ? 1 : undefined },
+            { key: 'messages', label: 'Messages', href: href('messages') },
+          ]}
+        />
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs lg:shrink-0">
+          {p.nda_status !== 'none' && (
+            <Link href={href('agreement')} className={tab === 'agreement' ? 'font-semibold text-ink underline' : 'text-muted hover:text-ink'}>
+              Confidentiality agreement{p.nda_status === 'prepared' ? ' (action needed)' : ''}
+            </Link>
+          )}
+          {p.engagement === 'retainer' && (
+            <Link href={href('monitoring')} className={tab === 'monitoring' ? 'font-semibold text-ink underline' : 'text-muted hover:text-ink'}>
+              Monitoring plan
+            </Link>
+          )}
+          <Link href={href('settings')} className={tab === 'settings' ? 'font-semibold text-ink underline' : 'text-muted hover:text-ink'}>
+            Project settings & privacy
           </Link>
-        )}
-        {p.engagement === 'retainer' && (
-          <Link href={href('monitoring')} className={tab === 'monitoring' ? 'font-semibold text-ink underline' : 'text-muted hover:text-ink'}>
-            Monitoring plan
-          </Link>
-        )}
-        <Link href={href('settings')} className={tab === 'settings' ? 'font-semibold text-ink underline' : 'text-muted hover:text-ink'}>
-          Project settings & privacy
-        </Link>
+        </div>
       </div>
 
+      {(tab === 'settings' || tab === 'overview') && <EngagementPanel projectId={p.id} />}
       {tab === 'overview' && (
         <div className="grid gap-6 lg:grid-cols-[1.4fr_1fr] lg:items-start">
           <div className="space-y-6">
-            {!['delivered','monitoring','closed'].includes(p.stage) && <VisitReadiness project={p} />}
-            {reports[0] && lock && (
+            {showVisitPlan(p) && <VisitPlan project={p} paymentPending={!!deposit?.payment_notified} />}
+            {reports[0] && !reports[0].client_unlocked && lock && (
               <section className="panel panel-pad">
                 <p className="kicker">Latest report · {fmtDate(reports[0].published_at, tz)}</p>
                 <h2 className="mt-1 text-lg">{reports[0].title}</h2>
@@ -149,7 +207,7 @@ export default async function ProjectPage({ params: paramsPromise, searchParams:
                 <Link className="btn btn-primary btn-small mt-4" href={href('operations')}>How to pay</Link>
               </section>
             )}
-            {reports[0] && !lock && (
+            {reports[0] && reports[0].client_unlocked && (
               <section className="panel panel-pad">
                 <p className="kicker">Latest report · {fmtDate(reports[0].published_at, tz)}</p>
                 <h2 className="mt-1 text-lg">{reports[0].title}</h2>
@@ -168,7 +226,7 @@ export default async function ProjectPage({ params: paramsPromise, searchParams:
                 <dt>Project health</dt>
                 <dd><HealthChip health={p.health} />{p.health_note ? <span className="mt-1 block text-ink-2">{p.health_note}</span> : null}</dd>
                 <dt>Next {profile.activity.toLowerCase()}</dt>
-                <dd>{p.next_inspection ? `${fmtDate(p.next_inspection, tz)} (${relativeDays(p.next_inspection)})` : 'Not booked yet'}</dd>
+                <dd>{p.next_inspection ? `${fmtVisit(p.next_inspection, p.next_arrival)} (${relativeDays(p.next_inspection)})` : (() => { const last = inspections.filter((i) => ['submitted', 'reviewed'].includes(i.status)).at(-1); return last ? `Done${last.scheduled_for ? ` ${fmtDate(last.scheduled_for, tz)}` : ''}` : 'Not booked yet' })()}</dd>
                 <dt>Your analyst</dt>
                 <dd>{p.analyst_name ?? 'Being assigned'}</dd>
                 {reports[0] ? (
@@ -189,16 +247,10 @@ export default async function ProjectPage({ params: paramsPromise, searchParams:
           </div>
           <div className="space-y-6">
             <section className="panel panel-pad space-y-3">
-              <h2 className="text-lg">Need something?</h2>
+              <h2 className="text-lg">Help & follow-up</h2>
               <Link className="btn btn-secondary w-full" href={href('messages')}>Message your analyst</Link>
               {['delivered', 'monitoring'].includes(p.stage) && (
                 <Link className="btn btn-secondary w-full" href={`/estimate?project=${p.code}`}>Request a follow-up visit</Link>
-              )}
-              {p.stage === 'onboarding' && (!p.onboarding_submitted_at || !p.data_consent_at) && (
-                <Link className="btn btn-primary w-full" href={href('onboarding')}>Provide {profile.tab.toLowerCase()}</Link>
-              )}
-              {deposit && !deposit.payment_notified && (
-                <Link className="btn btn-secondary w-full" href={href('operations')}>Pay deposit ({kes(deposit.due_kes)})</Link>
               )}
               {site.bookingUrl && <a className="btn btn-secondary w-full" href={site.bookingUrl} target="_blank" rel="noopener">Book a walkthrough call</a>}
             </section>
@@ -211,84 +263,32 @@ export default async function ProjectPage({ params: paramsPromise, searchParams:
       )}
 
       {tab === 'onboarding' && (
-        <div className="grid gap-6 lg:grid-cols-[1.4fr_1fr] lg:items-start">
-          <section className="panel panel-pad space-y-4">
-            <div>
-              <h2 className="text-lg">{profile.title}</h2>
-              <p className="hint">
-                {!['onboarding', 'planning'].includes(p.stage)
-                  ? 'Fieldwork has started, so the brief is fixed. Message your analyst about any change.'
-                  : p.onboarding_submitted_at
-                  ? `Sent ${fmtDate(p.onboarding_submitted_at, tz)}. You can still update these details until fieldwork starts.`
-                  : 'Save as you go, review your answers and send your brief when ready.'}
-              </p>
-            </div>
-            <OnboardingForm
-              submitted={!!p.onboarding_submitted_at && !!p.data_consent_at}
-              v={{
-                projectId: p.id,
-                context: { service_code:p.service_code, service_name:p.service_name, engagement:p.engagement },
-                serviceBrief:p.service_brief,
-                title: p.title,
-                locationLabel: p.location_label,
-                county: p.county,
-                siteDirections: p.site_directions,
-                siteAccessNotes: p.site_access_notes,
-                claims: p.claims,
-                concerns: p.concerns,
-                investmentValue: p.investment_value_kes,
-              }}
-            />
-          </section>
-          <div className="space-y-6">
-            <section className="panel panel-pad space-y-4">
-              <div>
-                <h2 className="text-lg">{profile.people}</h2>
-                <p className="hint">{profile.peopleHint}</p>
-              </div>
-              {contacts.length > 0 && (
-                <ul className="divide-y divide-line">
-                  {contacts.map((c) => (
-                    <li key={c.id} className="flex items-start justify-between gap-3 py-3 text-sm">
-                      <span>
-                        <strong>{c.name}</strong>{c.role ? ` · ${c.role}` : ''}
-                        <span className="block text-ink-2">{[c.phone, c.email].filter(Boolean).join(' · ')}</span>
-                        {c.notes && <span className="block text-muted">{c.notes}</span>}
-                        {!c.may_contact && <span className="block text-warn">Do not contact without asking you first</span>}
-                      </span>
-                      <form action={removeContactAction}>
-                        <input type="hidden" name="projectId" value={p.id} />
-                        <input type="hidden" name="contactId" value={c.id} />
-                        <button className="linkish text-muted" type="submit">Remove</button>
-                      </form>
-                    </li>
-                  ))}
-                </ul>
-              )}
-              <details>
-                <summary className="cursor-pointer text-sm font-semibold">Add a person</summary>
-                <form action={addContactAction} className="mt-3 space-y-3">
-                  <input type="hidden" name="projectId" value={p.id} />
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    <label className="label">Name<input className="input" name="name" required maxLength={120} /></label>
-                    <label className="label">Role<input className="input" name="role" maxLength={120} placeholder="e.g. Contractor" /></label>
-                    <label className="label">Phone<input className="input" name="phone" type="tel" maxLength={40} /></label>
-                    <label className="label">Email<input className="input" name="email" type="email" maxLength={160} /></label>
-                  </div>
-                  <label className="label">Notes <span className="opt">(optional)</span><input className="input" name="notes" maxLength={1000} /></label>
-                  <label className="check"><input type="checkbox" name="mayContact" defaultChecked /> AngaVeritas may contact this person directly</label>
-                  <button className="btn btn-secondary btn-small" type="submit">Add person</button>
-                </form>
-              </details>
-            </section>
-            <section className="panel panel-pad space-y-3">
-              <h2 className="text-lg">Documents</h2>
-              <p className="hint">Helpful documents: share what you have. These do not block sending your brief.</p><ul className="list-disc pl-5 text-sm text-ink-2 space-y-2">{profile.documents.map(item => <li key={item}>{item}</li>)}</ul>
-              <Link className="btn btn-secondary btn-small" href={href('files')}>Add or view documents in Files</Link>
-              <DocumentList files={documents} tz={tz} clientView />
-            </section>
+        <section className="panel max-w-3xl">
+          <div className="panel-head">
+            <h2>{profile.title}</h2>
+            {p.onboarding_submitted_at && !briefLocked && <p className="text-sm text-ink-2">Sent {fmtDate(p.onboarding_submitted_at, tz)}</p>}
           </div>
-        </div>
+          <OnboardingForm
+            locked={briefLocked}
+            submitted={!!p.onboarding_submitted_at && !!p.data_consent_at}
+            stepExtras={{ 1: peopleStep, 2: documentsStep }}
+            v={{
+              projectId: p.id,
+              context: { service_code:p.service_code, service_name:p.service_name, engagement:p.engagement },
+              serviceBrief:p.service_brief,
+              title: p.title,
+              locationLabel: p.location_label,
+              county: p.county,
+              locationLat: p.location_lat,
+              locationLng: p.location_lng,
+              siteDirections: p.site_directions,
+              siteAccessNotes: p.site_access_notes,
+              claims: p.claims,
+              concerns: p.concerns,
+              investmentValue: p.investment_value_kes,
+            }}
+          />
+        </section>
       )}
 
       {(tab === 'inspections' || tab === 'reports') && (
@@ -308,8 +308,8 @@ export default async function ProjectPage({ params: paramsPromise, searchParams:
                     <InspectionChip status={i.status} />
                   </div>
                 </div>
-                {i.status === 'reviewed' && lock ? (
-                  <p className="panel-pad text-ink-2">This visit has been checked. Its findings open once the remaining balance of {kes(lock.owedKes)} is paid. <Link href={href('operations')}>How to pay</Link></p>
+                {i.status === 'reviewed' && !i.client_unlocked ? (
+                  <p className="panel-pad text-ink-2">This visit has been checked. Its findings open once the remaining balance for this engagement is paid. <Link href={href('operations')}>How to pay</Link></p>
                 ) : i.status === 'reviewed' ? (
                   rows.length ? <FindingsTable findings={rows} /> : <p className="empty">The findings are in the report.</p>
                 ) : (
@@ -325,16 +325,14 @@ export default async function ProjectPage({ params: paramsPromise, searchParams:
           <section className="panel panel-pad space-y-3">
             <h2 className="text-lg">Photos and video</h2>
             <p className="text-ink-2">Each item shows its evidence ID, when it was taken and where. Photos appear here once a visit has been checked and the balance is paid.</p>
-            {lock && visibleInspections.some((i) => i.status === 'reviewed')
-              ? <p className="text-ink-2">Photos open once the remaining balance of {kes(lock.owedKes)} is paid.</p>
-              : <EvidenceGallery files={evidence} tz={tz} />}
+            <EvidenceGallery files={evidence} tz={tz} />
           </section>
         </div>
       )}
 
       {tab === 'reports' && (
         <section className="panel">
-          {lock && reports.length > 0 && <p className="alert alert-warn m-4">Your reports open once the remaining balance of {kes(lock.owedKes)} is paid. <Link href={href('operations')}>How to pay</Link></p>}
+          {lock && reports.length > 0 && <p className="alert alert-warn m-4">Reports for the current engagement open once its remaining balance for this engagement is paid. <Link href={href('operations')}>How to pay</Link></p>}
           {reports.length === 0 ? (
             <p className="empty">Your report will appear here as soon as it has passed review.</p>
           ) : (
@@ -344,10 +342,10 @@ export default async function ProjectPage({ params: paramsPromise, searchParams:
                   <Link href={`/portal/projects/${p.code}/reports/${r.id}`} className="flex flex-wrap items-center justify-between gap-3 px-6 py-4 text-ink no-underline hover:bg-paper">
                     <span>
                       <strong className="block">{r.title}</strong>
-                      <span className="text-sm text-ink-2">Published {fmtDate(r.published_at, tz)}{!lock && r.recommended_decision ? ` · ${r.recommended_decision}` : ''}</span>
+                      <span className="text-sm text-ink-2">Published {fmtDate(r.published_at, tz)}{r.client_unlocked && r.recommended_decision ? ` · ${r.recommended_decision}` : ''}</span>
                     </span>
                     <span className="flex gap-2">
-                      {!lock && r.overall_status && <span className={`chip chip--${r.overall_status}`}>{overallStatusLabels[r.overall_status]}</span>}
+                      {r.client_unlocked && r.overall_status && <span className={`chip chip--${r.overall_status}`}>{overallStatusLabels[r.overall_status]}</span>}
                       <ReportChip status={r.status} />
                     </span>
                   </Link>
@@ -362,7 +360,6 @@ export default async function ProjectPage({ params: paramsPromise, searchParams:
         <section className="panel panel-pad space-y-3"><h2 className="text-lg">Your documents</h2><p className="hint">Add plans, agreements or other documents the team should check.</p><Uploader projectId={p.id} category="client_document" label="Upload documents" accept={`application/pdf,image/*,.docx,.xlsx,.csv,.txt${scanningEnabled() ? ',.doc,.xls' : ''}`} /><DocumentList files={documents} tz={tz} clientView /></section>
         <section className="panel panel-pad space-y-3"><h2 className="text-lg">Reviewed photos and video</h2><EvidenceGallery files={evidence} tz={tz} /></section>
       </div>}
-      {tab === 'operations' && !deposit && balance && <p className="alert alert-warn">Balance to pay: <strong>{kes(balance.total)}</strong> on {balance.codes}. Pay it the same way as the deposit, then send us the transaction reference below.</p>}
       {tab === 'operations' && <OperationsPanel projectId={p.id} manager={false} section="billing" />}
       {tab === 'agreement' && <OperationsPanel projectId={p.id} manager={false} section="agreement" />}
       {tab === 'monitoring' && <OperationsPanel projectId={p.id} manager={false} section="monitoring" />}

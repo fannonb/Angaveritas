@@ -22,7 +22,7 @@ export default async function ReportsPage() {
   const rows = await sql<ReportRow[]>`
     select r.id, r.title, r.published_at, r.overall_status, r.recommended_decision, r.executive_summary, r.pdf_file_id,
       exists(select 1 from report_reads rr where rr.report_id = r.id and rr.user_id = ${user.id}) as viewed,
-      client_reports_unlocked(p.id) as unlocked,
+      work_order_unlocked(r.work_order_id) as unlocked,
       p.id as project_id, p.code as project_code, p.title as project_title, p.location_label
     from reports r join projects p on p.id = r.project_id
     where p.client_id = ${user.id} and r.status = 'published'
@@ -37,7 +37,7 @@ export default async function ReportsPage() {
   }
   const owed = new Map<string, { owedKes: number; codes: string } | null>()
   for (const group of projects.values()) {
-    if (group.reports.some((r) => !r.unlocked)) owed.set(group.id, await reportLock(group.id))
+    for(const r of group.reports) if(!r.unlocked) owed.set(r.id,await reportLock(group.id,r.id))
   }
 
   const newCount = rows.filter((r) => !r.viewed).length
@@ -63,7 +63,7 @@ export default async function ReportsPage() {
           </section>
 
           {[...projects.values()].map((group) => {
-            const due = owed.get(group.id)
+            
             return (
               <section key={group.id} className="panel" aria-labelledby={`project-${group.id}`}>
                 <div className="panel-head">
@@ -75,6 +75,7 @@ export default async function ReportsPage() {
                 </div>
                 <ul className="divide-y divide-line">
                   {group.reports.map((r) => {
+                    const due=owed.get(r.id)
                     const href = `/portal/projects/${group.code}/reports/${r.id}`
                     return (
                       <li key={r.id} className="grid gap-3 px-6 py-5 md:grid-cols-[minmax(0,1fr)_auto] md:items-center">

@@ -4,7 +4,7 @@ import { AppIcon } from './icons'
 type Shortcut = { href: string; label: string; icon: string; count?: number }
 
 /** Desktop top bar: an optional search, shortcut buttons with unread counts, and the signed-in person. */
-export function AppTopbar({ search, shortcuts, user }: { search?: { action: string; placeholder: string; params?: Record<string, string> }; shortcuts: Shortcut[]; user: { name: string; detail: string; href?: string } }) {
+export function AppTopbar({ search, shortcuts, actions, user }: { search?: { action: string; placeholder: string; params?: Record<string, string> }; shortcuts: Shortcut[]; actions?: React.ReactNode; user: { name: string; detail: string; href?: string } }) {
   const initials = user.name.split(' ').filter(Boolean).map((n) => n[0]).slice(0, 2).join('').toUpperCase() || 'AV'
   const who = (
     <>
@@ -37,6 +37,7 @@ export function AppTopbar({ search, shortcuts, user }: { search?: { action: stri
             {s.count ? <span className="icon-btn__count" aria-hidden="true">{s.count > 9 ? '9+' : s.count}</span> : null}
           </Link>
         ))}
+        {actions}
       </div>
       {user.href ? <Link href={user.href} className="app-user">{who}</Link> : <span className="app-user">{who}</span>}
     </header>

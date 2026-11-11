@@ -13,6 +13,7 @@ export default function InvoiceDocument({ inv }: { inv: InvoiceDoc }) {
   const due = inv.dueOn ? ` by ${fmtDate(inv.dueOn)}` : ' as agreed in your proposal'
   const terms = inv.status === 'cancelled'
     ? `This invoice was cancelled${inv.cancelledAt ? ` on ${fmtDate(inv.cancelledAt)}` : ''}${inv.cancelReason ? `: ${inv.cancelReason}` : ''}. Nothing is owed on it.`
+    : inv.creditKes > 0 ? `Nothing further to pay. You have overpaid by ${money(inv.creditKes)} after this adjustment. Your analyst will arrange a refund.`
     : inv.balanceKes === 0 ? 'Paid in full. Thank you.'
     : inv.depositDueKes > 0 && inv.depositKes < inv.amountKes ? `A deposit of ${money(inv.depositKes)} is due before we schedule the site visit. The balance of ${money(inv.amountKes - inv.depositKes)} is due${due}.`
     : inv.depositDueKes > 0 ? 'Payment in full is due before we schedule the site visit.'
@@ -49,6 +50,7 @@ export default function InvoiceDocument({ inv }: { inv: InvoiceDoc }) {
         <div><dt>Project</dt><dd>{inv.project.code}</dd></div>
       </dl>
       <p className="invoice__project">{inv.project.title}{inv.project.location ? ` · ${inv.project.location}` : ''}</p>
+      {inv.revision > 1 && <p className="invoice__terms">Revision {inv.revision}: {inv.revisionReason}</p>}
 
       <table className="invoice__lines">
         <thead><tr><th scope="col">Description</th><th scope="col" className="num">Amount</th></tr></thead>
@@ -70,6 +72,7 @@ export default function InvoiceDocument({ inv }: { inv: InvoiceDoc }) {
           ? <div className="is-strong is-balance"><dt>Amount due</dt><dd>Cancelled</dd></div>
           : <div className="is-strong is-balance"><dt>Balance due</dt><dd>{money(inv.balanceKes)}</dd></div>}
         {inv.status === 'issued' && inv.depositDueKes > 0 && inv.depositDueKes < inv.balanceKes && <div className="is-now"><dt>Due now (deposit)</dt><dd>{money(inv.depositDueKes)}</dd></div>}
+        {inv.creditKes > 0 && <div className="is-now"><dt>Overpaid · refund to arrange</dt><dd>{money(inv.creditKes)}</dd></div>}
       </dl>
       <p className="invoice__terms">{terms}</p>
 

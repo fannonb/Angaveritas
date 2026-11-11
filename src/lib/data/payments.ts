@@ -5,7 +5,7 @@ export const historyPageSize = 10
 
 // What a client sees of their own invoices and payments. Only their projects are read, and the internal reconciliation
 // note on each payment is never selected.
-export type InvoiceStatus = 'paid' | 'part' | 'due' | 'overdue' | 'checking' | 'waived'
+export type InvoiceStatus = 'paid' | 'part' | 'due' | 'overdue' | 'checking' | 'waived' | 'credit'
 
 export async function clientPayments(clientId: string, historyPage = 1) {
   const rows = await sql<{
@@ -17,7 +17,7 @@ export async function clientPayments(clientId: string, historyPage = 1) {
       coalesce((select sum(case when pay.kind = 'payment' then pay.amount_kes else -pay.amount_kes end) from payments pay where pay.invoice_id = i.id), 0)::int as paid_kes,
       (i.amount_kes - coalesce((select sum(case when pay.kind = 'payment' then pay.amount_kes else -pay.amount_kes end) from payments pay where pay.invoice_id = i.id), 0))::int as owed_kes,
       p.code as project_code, p.title as project_title, p.payment_status,
-      exists(select 1 from payment_notices n where n.invoice_id = i.id and n.status = 'pending') as checking
+      (exists(select 1 from payment_notices n where n.invoice_id = i.id and n.status = 'pending') or exists(select 1 from paystack_attempts a where a.invoice_id=i.id and ((a.status in ('initializing','pending') and a.created_at > now() - interval '30 minutes') or (a.status='review' and a.reviewed_at is null)))) as checking
     from invoices i join projects p on p.id = i.project_id
     where p.client_id = ${clientId} and i.status = 'issued'
     order by i.created_at desc`
@@ -26,7 +26,8 @@ export async function clientPayments(clientId: string, historyPage = 1) {
   const invoices = rows.map((r) => {
     let status: InvoiceStatus
     if (r.payment_status === 'waived') status = 'waived'
-    else if (r.owed_kes <= 0) status = 'paid'
+    else if (r.owed_kes < 0) status = 'credit'
+    else if (r.owed_kes === 0) status = 'paid'
     else if (r.checking) status = 'checking'
     else if (r.due_on && r.due_on < today) status = 'overdue'
     else if (r.paid_kes > 0) status = 'part'

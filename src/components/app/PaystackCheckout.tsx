@@ -2,7 +2,8 @@
 import { useState } from 'react'
 import { kes } from './format'
 
-export default function PaystackCheckout({ invoiceId, balance, depositDue, testMode }: { invoiceId: string; balance: number; depositDue: number; testMode: boolean }) {
+// `resume`: a checkout opened in the last 30 minutes exists; starting checkout again reopens that same one.
+export default function PaystackCheckout({ invoiceId, balance, depositDue, testMode, resume = false }: { invoiceId: string; balance: number; depositDue: number; testMode: boolean; resume?: boolean }) {
   const [busy,setBusy] = useState(false)
   const [error,setError] = useState('')
   async function checkout(purpose: 'deposit' | 'balance') {
@@ -18,10 +19,10 @@ export default function PaystackCheckout({ invoiceId, balance, depositDue, testM
   }
   return <div className="no-print space-y-2">
     <div className="flex flex-wrap items-center gap-2">
-      {depositDue >= 3 && depositDue < balance && <button className="btn btn-primary btn-small" disabled={busy} onClick={() => checkout('deposit')}>Pay deposit · {kes(depositDue)}</button>}
-      {balance >= 3 && <button className="btn btn-secondary btn-small" disabled={busy} onClick={() => checkout('balance')}>{busy ? 'Opening checkout…' : `Pay balance · ${kes(balance)}`}</button>}
+      {depositDue >= 3 && depositDue < balance && <button className="btn btn-primary" disabled={busy} onClick={() => checkout('deposit')}>Pay deposit {kes(depositDue)}</button>}
+      {balance >= 3 && <button className={`btn ${depositDue>0 && depositDue < balance ? 'btn-secondary' : 'btn-primary'}`} disabled={busy} onClick={() => checkout('balance')}>{busy ? 'Opening Paystack…' : resume ? `Continue payment ${kes(balance)}` : `Pay ${depositDue>0 && depositDue < balance ? 'in full' : ''} ${kes(balance)}`.replace('  ', ' ')}</button>}
     </div>
-    <p className="hint">{testMode ? 'Test checkout — use Paystack test payment details.' : 'Pay securely through Paystack. Available payment methods appear at checkout.'}</p>
+    <p className="hint">Card or M-Pesa, through Paystack.{testMode ? ' Test mode: use Paystack test details.' : ''}</p>
     {error && <p className="text-sm text-bad" role="alert">{error}</p>}
   </div>
 }

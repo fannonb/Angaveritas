@@ -1,4 +1,5 @@
 'use server'
+import { requiredDeposit } from '@/lib/billing'
 
 import { briefProfile } from '@/lib/service-briefs'
 import { revalidatePath } from 'next/cache'
@@ -7,6 +8,7 @@ import { logEvent, notifyTeam, notifyUser } from '@/lib/activity'
 import { requestIpHash, requireStaff, type SessionUser } from '@/lib/auth/session'
 import { issueToken } from '@/lib/auth/tokens'
 import { sql, withActor } from '@/lib/db'
+import { startVisitIfScheduled, visitStarted } from '@/lib/fieldwork'
 import { deleteFileRow, getFile, updateFileMeta, uploadWriteProblem } from '@/lib/data/files'
 import {
   addFinding,
@@ -18,7 +20,7 @@ import {
   updateFinding,
   updateInspectionPlan,
 } from '@/lib/data/inspections'
-import { postMessage } from '@/lib/data/messages'
+import { dismissReply, postMessage, threadsAwaitingReply } from '@/lib/data/messages'
 import { reportLock, unpaidInvoices } from '@/lib/data/operations'
 import { setEnquiryStatus } from '@/lib/data/misc'
 import { getActivePricing, getPricingVersion, savePricingVersion } from '@/lib/data/pricing'
@@ -37,6 +39,7 @@ import {
   requestStatusLabels,
   stageLabels,
   staffRoles,
+  arrivalWindowOrNull,
   type Confidence,
   type FindingStatus,
   type Health,
@@ -46,7 +49,7 @@ import {
 } from '@/lib/labels'
 import { configProblems, pricingConfigSchema, type PricingConfig } from '@/lib/pricing/config'
 import { site } from '@/lib/site'
-import { fmtDate } from '@/components/app/format'
+import { fmtDate, fmtVisit } from '@/components/app/format'
 import { deleteObject } from '@/lib/storage'
 import { emailSchema, formText, lines } from '@/lib/validation'
 
@@ -142,8 +145,7 @@ export async function saveProposalAction(_: StaffState, form: FormData): Promise
   const objectives = formText(form, 'objectives', 4000)
   const timeline = formText(form, 'timeline', 500)
   const paymentTerms = formText(form, 'paymentTerms', 1000)
-  const deposit = formText(form,'depositKes',20)
-  const depositKes = deposit === null ? null : Number(deposit)
+  const depositKes = requiredDeposit(items.reduce((sum, item) => sum + item.amount, 0))
   const problems = [
     !title && 'Add a title.',
     !objectives && 'Say what the engagement will answer.',
@@ -263,7 +265,13 @@ export async function updateProjectAction(_: StaffState, form: FormData): Promis
   if (!title) return { error: 'Title is required.' }
   if (str(form,'paymentStatus') !== p.payment_status && !formText(form,'paymentNote',1000)) return {error:'Record a payment reference or waiver reason when changing payment status.'}
   // A waiver releases the reports without money received, so it needs an admin, not the analyst running the project.
-  if (str(form,'paymentStatus') !== p.payment_status && (str(form,'paymentStatus') === 'waived' || p.payment_status === 'waived') && user.role !== 'admin') return {error:'Only an admin can waive payment or lift a waiver.'}
+  if (str(form,'paymentStatus') !== p.payment_status && user.role !== 'admin') return {error:'Only an admin can change the payment status. Payments recorded on the Billing tab update it automatically.'}
+  if(stage==='closed'&&p.stage!=='closed') {
+    if((await sql`select 1 from workflow_cases where project_id=${p.id} and status in ('open','awaiting_client','accepted')`).length) return {error:'Resolve outstanding requests and settlement before closing.'}
+    if((await sql`select 1 from inspections where project_id=${p.id} and status in ('scheduled','in_progress','submitted')`).length) return {error:'Finish or cancel open visits before closing.'}
+    if((await sql`select 1 from reports where project_id=${p.id} and status in ('draft','in_review')`).length) return {error:'Resolve unfinished reports before closing.'}
+    if(form.get('closeWithBalance')==='on'&&user.role!=='admin') return {error:'Only an admin can authorize closure with an outstanding balance.'}
+  }
   if (stage === 'closed' && p.stage !== 'closed' && form.get('closeWithBalance') !== 'on' && str(form,'paymentStatus') !== 'waived') {
     const owed = (await unpaidInvoices(p.id)).reduce((s, u) => s + u.unpaid_kes, 0)
     if (owed > 0) return {error:`KES ${owed.toLocaleString('en-US')} is still unpaid on this project. Record the payment, cancel the invoice, or tick the box to close it anyway.`}
@@ -280,7 +288,8 @@ export async function updateProjectAction(_: StaffState, form: FormData): Promis
     // silently overwrite an assignment made by someone else.
     leadAnalystId: p.lead_analyst_id,
     fieldAgentId: p.field_agent_id,
-    startDate: dateOrNull(formText(form, 'startDate', 10)),
+    // Visit dates live on the inspection; the old project start date is kept as it was and no longer edited here.
+    startDate: p.start_date ? String(p.start_date).slice(0, 10) : null,
     dueDate: dateOrNull(formText(form, 'dueDate', 10)),
     paymentStatus: ['awaiting_payment', 'deposit_received', 'paid', 'waived'].includes(str(form, 'paymentStatus')) ? str(form, 'paymentStatus') : p.payment_status,
     planningNotes: formText(form, 'planningNotes', 8000),
@@ -382,21 +391,34 @@ export async function staffRemoveContactAction(form: FormData) {
 
 // ---------- Inspections ----------
 
+// An exact arrival time wins over the named window.
+const arrival = (form: FormData) => arrivalWindowOrNull(formText(form, 'arrivalTime', 5) ?? formText(form, 'arrivalWindow', 10))
+
 export async function createInspectionAction(form: FormData) {
   const user = await requireStaff(managers)
   const access = await managedProject(form, user)
   const p = access.project
   const title = formText(form, 'title', 200) ?? 'Site inspection'
   const scheduledFor = dateOrNull(formText(form, 'scheduledFor', 10))
+  // A visit is booked with its date, so the client and field agent always know when it happens.
+  if (!scheduledFor) redirect(`/staff/projects/${p.code}?tab=inspections&error=${encodeURIComponent('Choose the visit date.')}`)
+  const arrivalWindow = arrival(form)
   const agentId = /^[0-9a-f-]{36}$/.test(str(form, 'agentId')) ? str(form, 'agentId') : p.field_agent_id
   const problem = fieldworkProblem(p, agentId)
   if (problem) redirect(`/staff/projects/${p.code}?tab=inspections&error=${encodeURIComponent(problem)}`)
   // The client's claims become the starting checklist for the field team.
   const objectives = formText(form, 'objectives', 8000) ?? (p.claims ? `Verify:\n${p.claims}` : null)
   const siteId = /^[0-9a-f-]{36}$/i.test(str(form,'siteId')) ? str(form,'siteId') : null
-  const insp = await createInspection(p.id, { title, scheduledFor, agentId, objectives,siteId }, user.id)
-  await logEvent({ actorId: user.id, projectId: p.id, type: 'inspection.scheduled', summary: `${briefProfile(p).activity} ${insp.code} scheduled${scheduledFor ? ` for ${scheduledFor}` : ''}`, clientVisible: true })
-  if (scheduledFor) await notifyUser(p.client_id, { title: `${briefProfile(p).activity} scheduled: ${p.title}`, body: `Our field team is scheduled for ${scheduledFor}.`, href: `/portal/projects/${p.code}?tab=inspections` })
+  let insp
+  try { insp=await createInspection(p.id,{title,scheduledFor,arrivalWindow,agentId,objectives,siteId},user.id) } catch(e) { redirect(`/staff/projects/${p.code}?tab=inspections&error=${encodeURIComponent(e instanceof Error?e.message:'Could not schedule.')}`) }
+  // The report date is agreed when the visit is booked; the client sees it as "Report expected".
+  const dueDate = dateOrNull(formText(form, 'dueDate', 10))
+  if (dueDate && dueDate !== (p.due_date ? String(p.due_date).slice(0, 10) : null)) {
+    await withActor(user.id, async (tx) => tx`update projects set due_date = ${dueDate} where id = ${p.id}`)
+    await logEvent({ actorId: user.id, projectId: p.id, type: 'project.due_date', summary: `Report expected by ${fmtDate(dueDate)}`, clientVisible: true })
+  }
+  await logEvent({ actorId: user.id, projectId: p.id, type: 'inspection.scheduled', summary: `${briefProfile(p).activity} ${insp.code} scheduled${scheduledFor ? ` for ${fmtVisit(scheduledFor, arrivalWindow)}` : ''}`, clientVisible: true })
+  if (scheduledFor) await notifyUser(p.client_id, { title: `${briefProfile(p).activity} booked: ${p.title}`, body: `Our field agent will visit on ${fmtVisit(scheduledFor, arrivalWindow)}. Please let the people on site know to expect us. Need a different date? Reply to your analyst in Messages.`, href: `/portal/projects/${p.code}` })
   if (agentId) await notifyUser(agentId, { title: `New inspection ${insp.code}: ${p.title}`, body: scheduledFor ? `Scheduled for ${scheduledFor}.` : undefined, href: `/staff/inspections/${insp.id}` })
   refreshProject(p.code)
   redirect(`/staff/inspections/${insp.id}`)
@@ -408,6 +430,7 @@ async function inspectionAccess(form: FormData, user: SessionUser) {
   const access = await projectFor(user, insp.project_id)
   if (!access?.canFieldwork) throw new Error('Not allowed.')
   if (user.role === 'field_agent' && insp.agent_id !== user.id && !(insp.agent_id === null && access.project.field_agent_id === user.id)) throw new Error('Not allowed.')
+  access.project={...access.project,work_hold_reason:insp.work_hold_reason,brief_approved:!!insp.brief_approved,payment_status:insp.payment_status}
   return { insp, access }
 }
 
@@ -415,6 +438,8 @@ async function editableInspection(form: FormData, user: SessionUser) {
   const result = await inspectionAccess(form, user)
   const problem = fieldCollectionProblem(result.access.project, result.insp)
   if (problem) redirect(`/staff/inspections/${result.insp.id}?error=${encodeURIComponent(problem)}`)
+  // The first thing recorded starts the visit.
+  if (await startVisitIfScheduled(result.insp, result.access.project, user.id)) result.insp.status = 'in_progress'
   return result
 }
 
@@ -423,11 +448,16 @@ export async function updateInspectionPlanAction(form: FormData) {
   const { insp, access } = await inspectionAccess(form, user)
   if (!['scheduled','in_progress'].includes(insp.status)) redirect(`/staff/inspections/${insp.id}?error=${encodeURIComponent('Reopen the inspection before changing its plan.')}`)
   const scheduledFor = dateOrNull(formText(form, 'scheduledFor', 10))
+  const arrivalWindow = scheduledFor ? arrival(form) : null
   const agentId = /^[0-9a-f-]{36}$/.test(str(form, 'agentId')) ? str(form, 'agentId') : null
-  await updateInspectionPlan(insp.id, { title: formText(form, 'title', 200) ?? insp.title, scheduledFor, agentId, objectives: formText(form, 'objectives', 8000) })
-  if (scheduledFor && scheduledFor !== insp.scheduled_for) {
-    await logEvent({ actorId: user.id, projectId: insp.project_id, type: 'inspection.rescheduled', summary: `${briefProfile(access.project).activity} ${insp.code} scheduled for ${fmtDate(scheduledFor)}`, clientVisible: true })
-    await notifyUser(access.project.client_id, { title: `Site visit date: ${scheduledFor}`, body: `${access.project.title}: ${insp.title}`, href: `/portal/projects/${access.project.code}?tab=inspections` })
+  try {
+  await updateInspectionPlan(insp.id, { title: formText(form, 'title', 200) ?? insp.title, scheduledFor, arrivalWindow, agentId, objectives: formText(form, 'objectives', 8000) })
+  } catch(e) { redirect(`/staff/inspections/${insp.id}?error=${encodeURIComponent(e instanceof Error?e.message:'Could not update the visit.')}`) }
+  if (scheduledFor && (scheduledFor !== insp.scheduled_for || arrivalWindow !== insp.arrival_window)) {
+    const activity = briefProfile(access.project).activity
+    const when = fmtVisit(scheduledFor, arrivalWindow)
+    await logEvent({ actorId: user.id, projectId: insp.project_id, type: 'inspection.rescheduled', summary: `${activity} ${insp.code} scheduled for ${when}`, clientVisible: true })
+    await notifyUser(access.project.client_id, { title: `${activity} ${insp.scheduled_for ? 'moved' : 'booked'}: ${access.project.title}`, body: `Our field agent will now visit on ${when}. Please let the people on site know. Need a different date? Reply to your analyst in Messages.`, href: `/portal/projects/${access.project.code}` })
   }
   if (agentId && agentId !== insp.agent_id) await notifyUser(agentId, { title: `Inspection ${insp.code} assigned to you`, href: `/staff/inspections/${insp.id}` })
   revalidatePath(`/staff/inspections/${insp.id}`)
@@ -438,6 +468,17 @@ export async function inspectionStatusAction(form: FormData) {
   const user = await requireStaff()
   const { insp, access } = await inspectionAccess(form, user)
   const to = str(form, 'to')
+  // An admin may review their own visit, so a second review step adds nothing: finish and release in one go.
+  if (to === 'released') {
+    if (user.role !== 'admin' || !access.canManage || !['scheduled', 'in_progress'].includes(insp.status)) return
+    await changeInspectionStatus(insp, access, user, 'submitted')
+    await changeInspectionStatus({ ...insp, status: 'submitted' }, access, user, 'reviewed', formText(form,'reviewException',2000))
+    return
+  }
+  await changeInspectionStatus(insp, access, user, to, formText(form,'reviewException',2000))
+}
+
+async function changeInspectionStatus(insp: NonNullable<Awaited<ReturnType<typeof getInspection>>>, access: ProjectAccess, user: SessionUser, to: string, reviewException: string | null = null) {
   const p = access.project
   const allowed: Record<string, string[]> = {
     in_progress: ['scheduled'],
@@ -463,13 +504,10 @@ export async function inspectionStatusAction(form: FormData) {
     if (user.role !== 'admin' && (insp.agent_id === user.id || contributors.some(c => c.id === user.id))) redirect(`/staff/inspections/${insp.id}?error=${encodeURIComponent('An independent person must review this inspection.')}`)
   }
 
-  try { await setInspectionStatus(insp.id, to as never, user.id) } catch (e) {
+  try { await setInspectionStatus(insp.id, to as never, user.id, reviewException) } catch (e) {
     redirect(`/staff/inspections/${insp.id}?error=${encodeURIComponent(e instanceof Error ? e.message : 'Could not change inspection status.')}`)
   }
-  if (to === 'in_progress') {
-    if (['planning', 'onboarding'].includes(p.stage)) await setProjectStage(p.id, 'fieldwork')
-    await logEvent({ actorId: user.id, projectId: p.id, type: 'inspection.started', summary: `Fieldwork started (${insp.code})`, clientVisible: true })
-  }
+  if (to === 'in_progress') await visitStarted(insp, p, user.id)
   if (to === 'submitted') {
     await logEvent({ actorId: user.id, projectId: p.id, type: 'inspection.submitted', summary: `Fieldwork for ${insp.code} complete. Evidence under review`, clientVisible: true })
     if (p.stage === 'fieldwork' || p.stage === 'planning') await setProjectStage(p.id, 'analysis')
@@ -687,6 +725,22 @@ export async function createReportAction(form: FormData) {
   redirect(`/staff/projects/${access.project.code}/reports/${id}`)
 }
 
+/** Removes an unwanted draft, e.g. a duplicate. Delivered reports cannot be deleted (the database refuses). */
+export async function discardReportDraftAction(form: FormData) {
+  const user = await requireStaff(managers)
+  const r = await getReport(str(form, 'reportId'))
+  if (!r) return
+  const access = await projectFor(user, r.project_id)
+  if (!access?.canManage || r.status !== 'draft') return
+  await withActor(user.id, async (tx) => {
+    await tx`delete from report_evidence where report_id = ${r.id}`
+    await tx`delete from reports where id = ${r.id} and status = 'draft'`
+  })
+  await logEvent({ actorId: user.id, projectId: r.project_id, type: 'report.discarded', summary: `Draft report discarded: ${r.title}` })
+  refreshProject(access.project.code)
+  redirect(`/staff/projects/${access.project.code}?tab=reports`)
+}
+
 export async function saveReportAction(_: StaffState, form: FormData): Promise<StaffState> {
   const user = await requireStaff(managers)
   const r = await getReport(str(form, 'reportId'))
@@ -720,8 +774,38 @@ export async function saveReportAction(_: StaffState, form: FormData): Promise<S
     await logEvent({ actorId: user.id, projectId: r.project_id, type: 'report.submitted', summary: `Report "${r.title}" submitted for review` })
     await notifyTeam({ title: `Report ready for review: ${access.project.code}`, body: r.title, href: `/staff/projects/${access.project.code}/reports/${r.id}` })
   }
+  // Admins approve reports, so one who wrote it publishes straight away instead of reviewing their own work.
+  if (intent === 'publish') {
+    if (user.role !== 'admin') return { error: 'Only an admin can publish a report. Submit it for review instead.' }
+    if (!formText(form, 'executiveSummary', 10) || !['ok', 'warn', 'bad'].includes(overall)) return { error: 'Add an executive summary and an overall status before publishing.' }
+    await setReportStatus(r.id, 'in_review', user.id)
+    const fresh = await getReport(r.id)
+    const problem = fresh ? await publishAndNotify(fresh, user, access.project, formText(form,'reviewException',2000)) : 'Report not found.'
+    if (problem) {
+      await setReportStatus(r.id, 'draft', user.id)
+      return { error: problem }
+    }
+    refreshProject(access.project.code)
+    redirect(`/staff/projects/${access.project.code}/reports/${r.id}`)
+  }
   revalidatePath(`/staff/projects/${access.project.code}/reports/${r.id}`)
   return { ok: true, message: intent === 'submit' ? 'Submitted for review.' : 'Saved.' }
+}
+
+/** Publishes a report awaiting review and tells the client. Returns a problem to show, or null. */
+async function publishAndNotify(r: NonNullable<Awaited<ReturnType<typeof getReport>>>, user: SessionUser, p: ProjectAccess['project'], reviewException: string | null = null) {
+  try { await publishReport(r.id, user, p, reviewException) } catch (e) { return e instanceof Error ? e.message : 'Publication failed.' }
+  await logEvent({ actorId: user.id, projectId: p.id, type: 'report.published', summary: `Report published: ${r.title}`, clientVisible: true })
+  // The recommendation stays out of the notification until the balance is paid.
+  const lock = await reportLock(p.id, r.id)
+  await notifyUser(p.client_id, {
+    title: `Your report is ready: ${p.title}`,
+    body: lock
+      ? `"${r.title}" is ready. It opens once the remaining balance of KES ${lock.owedKes.toLocaleString('en-US')} is paid.`
+      : `"${r.title}" has been reviewed and published.${r.recommended_decision ? ` Recommended decision: ${r.recommended_decision}.` : ''}`,
+    href: `/portal/projects/${p.code}/reports/${r.id}`,
+  })
+  return null
 }
 
 export async function reportStatusAction(form: FormData) {
@@ -735,26 +819,20 @@ export async function reportStatusAction(form: FormData) {
 
   if (to === 'published') {
     if (r.status !== 'in_review') return
-    try { await publishReport(r.id, user, p) } catch (e) {
-      redirect(`/staff/projects/${p.code}/reports/${r.id}?error=${encodeURIComponent(e instanceof Error ? e.message : 'Publication failed.')}`)
-    }
-    await logEvent({ actorId: user.id, projectId: p.id, type: 'report.published', summary: `Report published: ${r.title}`, clientVisible: true })
-    // The recommendation stays out of the notification until the balance is paid.
-    const lock = await reportLock(p.id)
-    await notifyUser(p.client_id, {
-      title: `Your report is ready: ${p.title}`,
-      body: lock
-        ? `"${r.title}" is ready. It opens once the remaining balance of KES ${lock.owedKes.toLocaleString('en-US')} is paid.`
-        : `"${r.title}" has been reviewed and published.${r.recommended_decision ? ` Recommended decision: ${r.recommended_decision}.` : ''}`,
-      href: `/portal/projects/${p.code}/reports/${r.id}`,
-    })
+    const problem = await publishAndNotify(r, user, p, formText(form,'reviewException',2000))
+    if (problem) redirect(`/staff/projects/${p.code}/reports/${r.id}?error=${encodeURIComponent(problem)}`)
   } else if (to === 'draft') {
     if (r.status !== 'in_review') return
+    const correction=formText(form,'note',2000)??''
+    if(correction.length<10)redirect(`/staff/projects/${p.code}/reports/${r.id}?error=${encodeURIComponent('Explain the changes needed in at least 10 characters.')}`)
+    await withActor(user.id,async tx=>tx`insert into workflow_cases(project_id,work_order_id,report_id,kind,title,detail,created_by,assigned_to)
+      values(${p.id},${r.work_order_id},${r.id},'report_correction',${'Correct report: '+r.title},${correction},${user.id},${r.author_id}) on conflict(report_id) where kind='report_correction' and status='open' do update set detail=excluded.detail,due_on=current_date+2`)
     await setReportStatus(r.id, 'draft', user.id)
     await logEvent({ actorId: user.id, projectId: p.id, type: 'report.returned', summary: `Report "${r.title}" returned to draft${formText(form, 'note', 1000) ? `: ${formText(form, 'note', 1000)}` : ''}` })
     if (r.author_id) await notifyUser(r.author_id, { title: `Report returned for changes: ${p.code}`, body: formText(form, 'note', 1000) ?? undefined, href: `/staff/projects/${p.code}/reports/${r.id}`, email: false })
   } else if (to === 'withdrawn') {
-    if (r.status !== 'published') return
+    // Only admins publish, so only admins take a delivered report back.
+    if (r.status !== 'published' || user.role !== 'admin') return
     try { await withdrawReport(r.id, user.id, formText(form, 'note', 1000) ?? '') } catch (e) {
       redirect(`/staff/projects/${p.code}/reports/${r.id}?error=${encodeURIComponent(e instanceof Error ? e.message : 'Withdrawal failed.')}`)
     }
@@ -913,8 +991,13 @@ export async function publicPricesAction(form: FormData) {
   for (const path of ['/', '/services', '/pricing']) revalidatePath(path)
 }
 
-export async function staffMarkReadAction() {
-  const user = await requireStaff()
-  await sql`update notifications set read_at = now() where user_id = ${user.id} and read_at is null`
+/** The × on "Reply to …": the client's last message needs no answer. A new client message brings the thread back. */
+export async function dismissReplyAction(form: FormData) {
+  const user = await requireStaff(managers)
+  const thread = str(form, 'thread')
+  const waiting = (await threadsAwaitingReply()).find((t) => t.thread === thread)
+  if (!waiting) return
+  await dismissReply(thread, waiting.last_at, user.id)
+  await logEvent({ actorId: user.id, projectId: waiting.project_id, requestId: waiting.request_id, type: 'message.no_reply', summary: `Marked "${waiting.label}" as needing no reply` })
   revalidatePath('/staff', 'layout')
 }

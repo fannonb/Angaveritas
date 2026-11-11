@@ -1,4 +1,5 @@
 import crypto from 'node:crypto'
+import { sendWorkflowReminders } from '@/lib/data/engagements'
 import { deliverQueuedEmail } from '@/lib/email'
 import { generateMonitoringCycles, sendBalanceReminders } from '@/lib/data/operations'
 import { sql } from '@/lib/db'
@@ -31,13 +32,14 @@ async function runJobs(req: Request) {
     const [actor] = await sql`select id from users where id=${actorId} and role='admin' and disabled_at is null`
     if (actor) { worker = actor.id; cycles = await generateMonitoringCycles(actorId) }
   }
+  const cases = await sendWorkflowReminders()
   const reminders = await sendBalanceReminders(worker)
   const staleUploads = await removeStaleUploads()
   await removeExpiredRateLimits().catch(e => console.error('[jobs] rate limit clean-up failed', e instanceof Error ? e.message : e))
   // Last, so the outbox also carries anything queued above. Bounded to stay inside the request timeout.
   let emails = 0
   for (let i=0;i<20;i++) { const result = await deliverQueuedEmail(); emails += result.sent; if (result.blocked || result.sent === 0) break }
-  return Response.json({emails,cycles,reminders,staleUploads,payments})
+  return Response.json({emails,cycles,reminders,cases,staleUploads,payments})
 }
 
 export const GET = runJobs

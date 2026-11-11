@@ -95,6 +95,19 @@ export const inspectionStatusLabels: Record<InspectionStatus, string> = {
   cancelled: 'Cancelled',
 }
 
+// When the field team expects to arrive: a named window or an exact Kenya time stored as 'HH:MM'.
+export const arrivalWindows = { morning: 'morning, 8am–12pm', midday: 'midday, 11am–2pm', afternoon: 'afternoon, 1pm–5pm' } as const
+export function arrivalWindowOrNull(v: unknown): string | null {
+  const s = String(v ?? '').trim()
+  return s in arrivalWindows || /^([01]\d|2[0-3]):[0-5]\d$/.test(s) ? s : null
+}
+export function arrivalLabel(w: string | null | undefined): string | null {
+  if (!w) return null
+  if (w in arrivalWindows) return `${arrivalWindows[w as keyof typeof arrivalWindows]} Kenya time`
+  const [h, m] = w.split(':').map(Number)
+  return `around ${h % 12 || 12}${m ? `:${String(m).padStart(2, '0')}` : ''}${h < 12 ? 'am' : 'pm'} Kenya time`
+}
+
 export type ReportStatus = 'draft' | 'in_review' | 'published' | 'withdrawn'
 export const reportStatusLabels: Record<ReportStatus, string> = {
   draft: 'Draft',

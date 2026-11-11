@@ -19,6 +19,9 @@ export const accountPhoneSchema = text(40)
 export const whatsappSchema = text(40).nullish()
   .refine(value => !value || !!normalizePhoneNumber(value), 'Please enter a valid WhatsApp number with its country code, or leave it blank.')
   .transform(value => value ? normalizePhoneNumber(value)! : null)
+const requiredWhatsappSchema = text(40).min(1, 'Please enter your WhatsApp number.')
+  .refine(value => !!normalizePhoneNumber(value), 'Please enter a valid WhatsApp number with its country code.')
+  .transform(value => normalizePhoneNumber(value)!)
 
 export const placeSchema = z.object({
   label: text(200).min(1),
@@ -41,7 +44,7 @@ export const registerSchema = z.object({
   fullName: text(120).min(2, 'Please enter your full name.'),
   email: emailSchema,
   phone: accountPhoneSchema,
-  whatsapp: whatsappSchema,
+  whatsapp: requiredWhatsappSchema,
   ...locationFields,
   timezone: z.string().max(60).optional(),
   password: z.string().min(1, 'Please choose a password.').max(200),

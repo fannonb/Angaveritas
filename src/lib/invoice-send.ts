@@ -38,8 +38,7 @@ export async function emailInvoice(invoiceId: string, projectId: string, actorId
       : why === 'reminder'
         ? `${overdue ? 'Balance overdue' : 'Payment reminder'}: ${inv.code}`
         : `Invoice ${inv.code}: ${inv.project.title}`
-  const reportOpen = why === 'payment' && (await sql<{ unlocked: boolean }[]>`select client_reports_unlocked(${projectId}) as unlocked`)[0]?.unlocked === true
-    && (await sql`select 1 from reports where project_id = ${projectId} and status = 'published' limit 1`).length > 0
+  const reportOpen = why === 'payment' && (await sql`select 1 from reports r join invoices i on i.work_order_id=r.work_order_id where i.id=${invoiceId} and r.status='published' and work_order_unlocked(r.work_order_id) limit 1`).length > 0
   const lines = why === 'payment'
     ? [
         `Hello ${first},`, '',
@@ -64,7 +63,7 @@ export async function emailInvoice(invoiceId: string, projectId: string, actorId
             `A reminder about invoice ${inv.code} for ${inv.project.title}.`, '',
             `Total: ${money(inv.amountKes)}`,
             `Paid to date: ${money(inv.paidKes)}`,
-            `Balance${due}: ${money(inv.balanceKes)}`,
+            `Amount due${due}: ${money(inv.dueAmountKes)}`,
             inv.state === 'deposit_paid' ? 'Your deposit is in; this is the remaining balance.' : '',
             '', ...howToPay,
           ]
@@ -82,7 +81,7 @@ export async function emailInvoice(invoiceId: string, projectId: string, actorId
     to: inv.client.email,
     copyTeam: true,
     subject,
-    text: lines.filter((l, i, a) => l !== '' || a[i - 1] !== '').join('\n'),
+    text: [...lines, ...(inv.revision > 1 ? ['', `Invoice revision ${inv.revision}: ${inv.revisionReason}`] : []), ...(inv.creditKes > 0 ? [`Overpaid: ${money(inv.creditKes)}. Your analyst will arrange a refund; no further payment is needed.`] : [])].filter((l, i, a) => l !== '' || a[i - 1] !== '').join('\n'),
     attachments: [{ filename: `AngaVeritas-${inv.code}.pdf`, content: await invoicePdf(inv) }],
   })
   await sql`update invoices set sent_at = now() where id = ${inv.id}`

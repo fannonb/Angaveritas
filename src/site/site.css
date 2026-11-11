@@ -91,7 +91,7 @@
   --warn-bg: #fdf3e1;
   --bad: #b42318;
   --bad-bg: #fdeceb;
-  --font: var(--font-neue-montreal), 'PP Neue Montreal', 'Neue Montreal', 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font: var(--font-neue-montreal, 'PP Neue Montreal'), 'Neue Montreal', 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
   --mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   --radius: 6px;
   --max: 1180px;
@@ -166,14 +166,14 @@ button, input, select, textarea { font: inherit; color: inherit; }
 
 /* Header */
 /* Top bar (desktop): what we do, hours and contacts. It scrolls away; the main bar stays pinned. */
-.topbar { display: none; background: var(--bg-ink); color: #c5cad1; font-size: 0.8rem; }
+.topbar { display: none; background: var(--gold-text); color: #f6eedc; font-size: 0.8rem; }
 @media (min-width: 1080px) { .topbar { display: block; } }
 .topbar__inner { display: flex; align-items: center; justify-content: space-between; gap: 1.5rem; min-height: 2.35rem; }
 .topbar__links { display: flex; align-items: center; gap: 1.5rem; list-style: none; }
 .topbar a { display: inline-flex; align-items: center; gap: 0.45rem; color: #fff; text-decoration: none; }
-.topbar a:hover { color: #e6cf94; }
-.topbar svg { color: #d9bd7a; }
-.topbar__muted { color: #9aa1a9; }
+.topbar a:hover { color: #f6eedc; text-decoration: underline; text-underline-offset: 0.18em; }
+.topbar svg { color: #f6eedc; }
+.topbar__muted { color: #e9dcb4; }
 
 /* Main bar: logo, menu, account and the one call to action */
 .site-header { position: sticky; top: 0; z-index: 40; background: rgba(255, 255, 255, 0.97); backdrop-filter: saturate(1.4) blur(8px); border-bottom: 1px solid var(--line); }
@@ -195,6 +195,8 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .header-account { display: inline-flex; align-items: center; gap: 0.45rem; color: var(--ink); font-size: 0.95rem; font-weight: 500; text-decoration: none; }
 .header-account svg { font-size: 1.05rem; color: var(--gold-text); }
 .header-account:hover { color: var(--gold-text); }
+.site-header .header-cta { background: var(--gold-text); box-shadow: none; }
+.site-header .header-cta:hover { background: #624816; box-shadow: none; }
 .header-cta svg { transition: transform 0.15s ease; }
 .header-cta:hover svg { transform: translateX(2px); }
 .menu-toggle { display: inline-flex; align-items: center; gap: 0.45rem; min-height: 2.6rem; padding: 0.45rem 0.95rem; border: 1px solid var(--line-strong); border-radius: 999px; background: #fff; color: var(--ink); font: inherit; font-weight: 600; font-size: 0.92rem; cursor: pointer; }

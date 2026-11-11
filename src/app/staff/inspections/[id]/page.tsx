@@ -1,11 +1,11 @@
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
-import { ConfidenceTag, FindingChip, InspectionChip } from '@/components/app/bits'
+import { ArrivalFields, ConfidenceTag, FindingChip, InspectionChip } from '@/components/app/bits'
 import EvidenceGallery from '@/components/app/EvidenceGallery'
 import FieldNotes from '@/components/app/FieldNotes'
 import GuidedFindingForm from '@/components/app/FindingForm'
 import VisitSubmit from '@/components/app/VisitSubmit'
-import { fmtDate, fmtDateTime } from '@/components/app/format'
+import { fmtDate, fmtDateTime, fmtVisit } from '@/components/app/format'
 import Uploader from '@/components/app/Uploader'
 import { requireStaff } from '@/lib/auth/session'
 import { listProjectFiles } from '@/lib/data/files'
@@ -66,14 +66,13 @@ export default async function InspectionPage({ params: paramsPromise, searchPara
       <section className="next-step" aria-label="What to do now">
         <div>
           <p className="next-step__label">What to do now</p>
-          {insp.status === 'scheduled' && <><p className="next-step__title">{insp.scheduled_for ? `Visit on ${fmtDate(insp.scheduled_for)}` : 'Visit date to be confirmed'}</p><p className="next-step__text">Press Start when you arrive. Then add photos and what you found, and send the visit for review at the end.</p></>}
+          {insp.status === 'scheduled' && <><p className="next-step__title">{insp.scheduled_for ? `Visit on ${fmtVisit(insp.scheduled_for, insp.arrival_window)}` : 'Visit date to be confirmed'}</p><p className="next-step__text">On site, work through the steps below: photos, checks, findings and notes. The visit starts with the first thing you record, and the client is told you are on site. Send it for review at the end.</p></>}
           {insp.status === 'in_progress' && <><p className="next-step__title">Visit in progress</p><p className="next-step__text">Add photos and what you found below. When you are done, send it for review at the bottom of the page.{insp.started_at ? ` Started ${fmtDateTime(insp.started_at)}.` : ''}</p></>}
           {insp.status === 'submitted' && <><p className="next-step__title">Sent for review{insp.submitted_at ? ` ${fmtDateTime(insp.submitted_at)}` : ''}</p><p className="next-step__text">{access.canManage ? (insp.agent_id === user.id && user.role !== 'admin' ? 'Someone other than the field agent must review this visit.' : 'Check the findings and photos, then release them to the client or reopen the visit.') : 'A reviewer is checking it. It is locked unless they reopen it.'}</p></>}
           {insp.status === 'reviewed' && <><p className="next-step__title">Reviewed</p><p className="next-step__text">Checked{insp.reviewed_at ? ` ${fmtDateTime(insp.reviewed_at)}` : ''}{insp.reviewed_by_name ? ` by ${insp.reviewed_by_name}` : ''}. Findings and {released} evidence items released. {evidence.length - released} evidence items remain held for review.</p></>}
           {insp.status === 'cancelled' && <><p className="next-step__title">Cancelled</p><p className="next-step__text">This visit will not go ahead.</p></>}
         </div>
         <div className="flex flex-wrap gap-2">
-          {insp.status === 'scheduled' && !locked && <StatusButton id={insp.id} to="in_progress" label="Start the visit" primary />}
           {access.canManage && insp.status === 'submitted' && (insp.agent_id !== user.id || user.role === 'admin') && <StatusButton id={insp.id} to="reviewed" label="Mark reviewed and release to client" primary />}
           {access.canManage && insp.status === 'cancelled' && <StatusButton id={insp.id} to="scheduled" label="Reopen" />}
           
@@ -179,6 +178,7 @@ export default async function InspectionPage({ params: paramsPromise, searchPara
                 <label className="label">Title<input className="input" name="title" defaultValue={insp.title} maxLength={200} /></label>
                 <div className="grid gap-3 sm:grid-cols-2">
                   <label className="label">Date<input className="input" type="date" name="scheduledFor" defaultValue={insp.scheduled_for ?? ''} /></label>
+                  <ArrivalFields value={insp.arrival_window} />
                   <label className="label">
                     Field agent
                     <select className="input" name="agentId" defaultValue={insp.agent_id ?? ''}>
@@ -356,8 +356,8 @@ export default async function InspectionPage({ params: paramsPromise, searchPara
                 {findings.length} finding{findings.length === 1 ? '' : 's'} and {evidence.length} evidence file{evidence.length === 1 ? '' : 's'} recorded.
                 {evidence.length === 0 ? ' Upload at least one photo or document.' : ''}
               </p>
-              <p className="hint">Save your notes first. Once sent, the visit is locked and a reviewer checks it before the client sees anything.</p>
-              <VisitSubmit inspectionId={insp.id} incomplete={completed < required.length || pendingCorrections.length > 0 || findings.length === 0 || evidence.length === 0} />
+              <p className="hint">{user.role === 'admin' ? 'Save your notes first. As an admin you can release the findings and checked evidence to the client straight away; the visit is then locked.' : 'Save your notes first. Once sent, the visit is locked and a reviewer checks it before the client sees anything.'}</p>
+              <VisitSubmit inspectionId={insp.id} release={user.role === 'admin'} incomplete={completed < required.length || pendingCorrections.length > 0 || findings.length === 0 || evidence.length === 0} />
             </section>
           )}
         </div>

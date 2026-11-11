@@ -1,5 +1,6 @@
 import 'server-only'
 import { inKenya, parseCoordinates } from '@/lib/coordinates'
+import { locationCountry } from '@/lib/location'
 
 export { inKenya, parseCoordinates }
 
@@ -7,7 +8,8 @@ export { inKenya, parseCoordinates }
 // GEOCODER_URL speaks the Photon API; ROUTER_URL speaks the OSRM API.
 // Both are swappable via environment variables (see .env.example).
 
-export type Place = { label: string; lat: number; lng: number }
+export type Place = { label: string; lat: number; lng: number; county?: string }
+export type Found = { label: string; county?: string }
 export type Distance = { oneWayKm: number; roundTripKm: number; method: 'road' | 'estimate' }
 
 const GEOCODER = process.env.GEOCODER_URL || 'https://photon.komoot.io/api/'
@@ -21,11 +23,40 @@ type PhotonFeature = {
   properties: { name?: string; street?: string; housenumber?: string; city?: string; county?: string; state?: string; district?: string; countrycode?: string; osm_value?: string }
 }
 
+// Kenyan counties as the repo names them, keyed by countyKey() so apostrophes, hyphens, slashes and spacing don't matter.
+const KENYA_COUNTIES = new Map<string, string>((locationCountry('KE')?.regions ?? []).map(r => [countyKey(r.name), r.name] as const))
+KENYA_COUNTIES.set('nairobi', 'Nairobi City') // OpenStreetMap usually just says "Nairobi"
+
+function countyKey(s: string) {
+  return s.normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z]/gi, '').toLowerCase()
+}
+
 /**
- * Reverse geocodes coordinates to a human-readable place description.
+ * Normalises a county from OpenStreetMap data to the repo's Kenyan county name ("Kajiado", "Murang'a").
+ * Unknown names come back cleaned rather than dropped.
+ */
+export function kenyaCounty(raw: string | undefined | null): string | undefined {
+  const name = String(raw ?? '').trim().replace(/\bcounty$/i, '').replace(/\s+/g, ' ').trim()
+  if (!name) return undefined
+  return KENYA_COUNTIES.get(countyKey(name)) ?? name
+}
+
+// Photon and Nominatim put the county (admin level 4) in `state`; `county` is often a sub-county.
+function countyFrom(p: { state?: string; county?: string }) {
+  return kenyaCounty(p.state) ?? kenyaCounty(p.county)
+}
+
+/**
+ * Reverse geocodes coordinates to a human-readable place description and county.
  * Queries Photon reverse first, then falls back to Nominatim if needed.
  */
-export async function reverseGeocode(lat: number, lng: number): Promise<string | null> {
+export async function reverseGeocode(lat: number, lng: number): Promise<Found | null> {
+  return (await reverseLookup(lat, lng)).place
+}
+
+/** As reverseGeocode, but `answered` is false only when neither service responded, so a dead upstream can be told apart from an empty result. */
+export async function reverseLookup(lat: number, lng: number): Promise<{ place: Found | null; answered: boolean }> {
+  let answered = false
   try {
     const url = new URL(GEOCODER.replace(/\/api\/?$/, '/reverse'))
     url.searchParams.set('lat', String(lat))
@@ -33,6 +64,7 @@ export async function reverseGeocode(lat: number, lng: number): Promise<string |
     url.searchParams.set('lang', 'en')
     const res = await fetch(url, { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(4000) })
     if (res.ok) {
+      answered = true
       const data = (await res.json()) as { features?: PhotonFeature[] }
       const f = data.features?.[0]
       if (f) {
@@ -45,7 +77,7 @@ export async function reverseGeocode(lat: number, lng: number): Promise<string |
           p.county ?? p.state,
         ]
         const label = [...new Set(parts.filter(Boolean) as string[])].slice(0, 4).join(', ')
-        if (label) return label
+        if (label) return { place: { label, county: countyFrom(p) }, answered }
       }
     }
   } catch {}
@@ -54,6 +86,7 @@ export async function reverseGeocode(lat: number, lng: number): Promise<string |
     const nomUrl = `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json`
     const nomRes = await fetch(nomUrl, { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(4000) })
     if (nomRes.ok) {
+      answered = true
       const d = (await nomRes.json()) as { name?: string; address?: Record<string, string> }
       const addr = d.address || {}
       const parts = [
@@ -64,11 +97,11 @@ export async function reverseGeocode(lat: number, lng: number): Promise<string |
         addr.county || addr.state,
       ]
       const label = [...new Set(parts.filter(Boolean) as string[])].slice(0, 4).join(', ')
-      if (label) return label
+      if (label) return { place: { label, county: countyFrom(addr) }, answered }
     }
   } catch {}
 
-  return null
+  return { place: null, answered }
 }
 
 export async function searchPlaces(q: string): Promise<Place[]> {
@@ -80,17 +113,19 @@ export async function searchPlaces(q: string): Promise<Place[]> {
     const places: Place[] = [
       {
         label: nearby
-          ? `📍 Exact GPS Pin: ${lat.toFixed(6)}, ${lng.toFixed(6)} (${nearby})`
+          ? `📍 Exact GPS Pin: ${lat.toFixed(6)}, ${lng.toFixed(6)} (${nearby.label})`
           : `📍 Exact GPS Pin: ${lat.toFixed(6)}, ${lng.toFixed(6)}`,
         lat,
         lng,
+        county: nearby?.county,
       },
     ]
     if (nearby) {
       places.push({
-        label: `${nearby} (${lat.toFixed(4)}, ${lng.toFixed(4)})`,
+        label: `${nearby.label} (${lat.toFixed(4)}, ${lng.toFixed(4)})`,
         lat,
         lng,
+        county: nearby.county,
       })
     }
     return places
@@ -115,7 +150,7 @@ export async function searchPlaces(q: string): Promise<Place[]> {
     const label = [...new Set(parts.filter(Boolean) as string[])].slice(0, 4).join(', ')
     if (!label || seen.has(label)) continue
     seen.add(label)
-    out.push({ label, lat, lng })
+    out.push({ label, lat, lng, county: countyFrom(p) })
   }
   return out.slice(0, 6)
 }

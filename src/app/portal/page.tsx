@@ -1,26 +1,27 @@
 import { briefProfile, briefStageLabels } from '@/lib/service-briefs'
 import Link from 'next/link'
 import { PageHeader } from '@/components/app/AppTopbar'
-import { HealthChip, ProjectMap, RequestChip, Timeline } from '@/components/app/bits'
+import { HealthChip, ProjectMap, ProjectProgress, RequestChip, Timeline } from '@/components/app/bits'
 import { Metric } from '@/components/app/dashboard'
-import { fmtDate, kes } from '@/components/app/format'
+import { fmtDate, fmtDateTime, kes } from '@/components/app/format'
 import { AppIcon } from '@/components/app/icons'
 import Pager from '@/components/app/Pager'
+import VisitPlan, { showVisitPlan } from '@/components/app/VisitPlan'
 import { requireClient } from '@/lib/auth/session'
-import { clientActivity, clientDepositsDue, clientReportsToRead, clientStats } from '@/lib/data/dashboard'
+import { clientActivity, clientBalancesDue, clientDepositsDue, clientReportsToRead, clientStats } from '@/lib/data/dashboard'
 import { clientLatestUnreadHref, clientUnreadCount } from '@/lib/data/messages'
+import { unreadNotificationCount, unreadNotifications } from '@/lib/data/misc'
+import { dismissNotificationAction, markAllReadAction, openNotificationAction } from '@/app/notification-actions'
+import { NotificationButton } from '@/components/app/NotificationPanel'
+import { listInspections } from '@/lib/data/inspections'
+import { unpaidInvoices } from '@/lib/data/operations'
 import { listProjectsForClient } from '@/lib/data/projects'
+import { listReports } from '@/lib/data/reports'
+import { projectProgress, type ProgressStep } from '@/lib/workflow'
 import { listRequestsForClient, openRequestStatuses } from '@/lib/data/requests'
-import { clientStageLabels, type ProjectStage } from '@/lib/labels'
+import { clientStageLabels } from '@/lib/labels'
 
 export const metadata = { title: 'Dashboard' }
-
-// The client-facing journey, for the progress bar on each project.
-const journey: ProjectStage[] = ['onboarding', 'planning', 'fieldwork', 'analysis', 'delivered']
-function progress(stage: ProjectStage) {
-  const at = stage === 'monitoring' || stage === 'closed' ? journey.length - 1 : journey.indexOf(stage)
-  return { step: at + 1, of: journey.length, pct: Math.round(((at + 1) / journey.length) * 100) }
-}
 
 type ClientProject = Awaited<ReturnType<typeof listProjectsForClient>>[number]
 
@@ -42,12 +43,11 @@ function AllCaughtUp({ completed }: { completed: number }) {
 }
 
 // The project the client is most concerned with, with the one thing that happens next.
-function ProjectHero({ p }: { p: ClientProject }) {
+function ProjectHero({ p, action, paymentPending, steps }: { p: ClientProject; action?: {href:string;title:string;text:string}; paymentPending:boolean; steps: ProgressStep[] }) {
   const profile = briefProfile(p)
   const labels = briefStageLabels(profile)
   const done = p.stage === 'closed'
-  const at = progress(p.stage)
-  const next = done
+  const next = action ? action.text : paymentPending ? 'Your payment reference is with our team. We will confirm it here; there is no need to pay again.' : done
     ? 'Complete. Your reports, messages and payment records stay available. Ask for a follow-up whenever you need more work.'
     : p.next_inspection
       ? `Next ${profile.activity.toLowerCase()} ${fmtDate(p.next_inspection)}. We share photos and findings once the visit is reviewed.`
@@ -66,17 +66,15 @@ function ProjectHero({ p }: { p: ClientProject }) {
           {!done && <HealthChip health={p.health} />}
         </div>
       </div>
-      {!done && (
-        <div className="flex items-center gap-3">
-          <span className="meter flex-1" role="progressbar" aria-valuenow={at.step} aria-valuemin={1} aria-valuemax={at.of} aria-label={`Step ${at.step} of ${at.of}: ${(labels[p.stage] ?? clientStageLabels[p.stage])}`}>
-            <span style={{ width: `${at.pct}%` }} />
-          </span>
-          <span className="shrink-0 text-xs font-semibold text-ink-2">{at.step}/{at.of}</span>
-        </div>
-      )}
-      <p className="text-ink-2">{next}</p>
+      {/* Until the visit, the plan shows what is ready, what we are arranging and the booked date. After it, every step and who it waits on. */}
+      {showVisitPlan(p) ? <div className="border-t border-line pt-4"><VisitPlan project={p} paymentPending={paymentPending} embedded /></div>
+        : done ? <p className="text-ink-2">{next}</p>
+        : <>
+            <div className="border-t border-line pt-4"><ProjectProgress steps={steps} viewer="client" /></div>
+            {(action || paymentPending) && <div><p className="kicker">Your next step</p>{action && <h3 className="mt-1 text-lg">{action.title}</h3>}<p className="mt-2 text-ink-2">{next}</p></div>}
+          </>}
       <div className="flex flex-wrap gap-2">
-        <Link className="btn btn-primary btn-small" href={`/portal/projects/${p.code}`}>Open project</Link>
+        <Link className="btn btn-primary btn-small" href={action?.href ?? `/portal/projects/${p.code}`}>{action ? 'Continue' : 'View project progress'}</Link>
         {done ? (
           <Link className="btn btn-secondary btn-small" href={`/estimate?project=${p.code}`}>Request a follow-up</Link>
         ) : (
@@ -90,14 +88,17 @@ function ProjectHero({ p }: { p: ClientProject }) {
 export default async function Dashboard({ searchParams: searchParamsPromise }: { searchParams: Promise<Record<string, string | undefined>> }) {
   const searchParams = await searchParamsPromise
   const user = await requireClient()
-  const [stats, projects, requests, activity, unread, deposits, toRead] = await Promise.all([
+  const [updates, updateCount, stats, projects, requests, activity, unread, deposits, toRead, balances] = await Promise.all([
+    unreadNotifications(user.id, 4),
+    unreadNotificationCount(user.id),
     clientStats(user.id),
     listProjectsForClient(user.id),
     listRequestsForClient(user.id),
-    clientActivity(user.id, Number(searchParams.activity) || 1),
+    clientActivity(user.id, Number(searchParams.activity) || 1, 5),
     clientUnreadCount(user.id),
     clientDepositsDue(user.id),
     clientReportsToRead(user.id),
+    clientBalancesDue(user.id),
   ])
   const unreadHref = unread ? await clientLatestUnreadHref(user.id) : null
   const openRequests = requests.filter((r) => openRequestStatuses.includes(r.status))
@@ -105,6 +106,8 @@ export default async function Dashboard({ searchParams: searchParamsPromise }: {
   const open = projects.filter((p) => p.stage !== 'closed')
   const completed = projects.filter((p) => p.stage === 'closed')
   const hero = open[0]
+  // The open project at the top of the home shows every step and who it waits on.
+  const heroSteps = hero ? projectProgress(hero, await listInspections(hero.id), await listReports(hero.id, true), (await unpaidInvoices(hero.id)).reduce((s, u) => s + u.unpaid_kes, 0), (d) => fmtDate(d)) : []
   const others = open.slice(1)
   const firstName = user.full_name.split(' ')[0]
 
@@ -112,8 +115,9 @@ export default async function Dashboard({ searchParams: searchParamsPromise }: {
   const todo: { href: string; title: string; text: string; icon: string }[] = [
     ...requests.filter((r) => r.status === 'proposal_sent').map((r) => ({ href: `/portal/requests/${r.reference}`, title: `Review your proposal for ${r.title}`, text: 'Accept online to start the work, or ask us a question.', icon: 'report' })),
     ...projects.filter((p) => p.stage !== 'closed' && (!p.onboarding_submitted_at || !p.data_consent_at)).map((p) => ({ href: `/portal/projects/${p.code}?tab=onboarding`, title: `Review ${briefProfile(p).tab.toLowerCase()} and consent for ${p.title}`, text: 'Complete the service brief, your priorities and permission to carry out the work.', icon: 'pin' })),
-    ...deposits.filter((d) => !d.payment_notified).map((d) => ({ href: `/portal/projects/${d.project_code}?tab=operations`, title: `Pay ${kes(d.due_kes)} for ${d.project_title}`, text: `We confirm the work plan once it arrives. Use invoice ${d.invoice_code} as the reference.`, icon: 'wallet' })),
-    ...projects.filter((p) => p.nda_status === 'prepared').map((p) => ({ href: `/portal/projects/${p.code}?tab=agreement`, title: `Sign the confidentiality agreement for ${p.title}`, text: 'Your agreement is ready. Review and sign it before fieldwork starts.', icon: 'review' })),
+    ...deposits.filter((d) => !d.payment_notified && !balances.some(b=>b.project_code===d.project_code&&b.invoice_code===d.invoice_code)).map((d) => ({ href: `/portal/projects/${d.project_code}?tab=operations`, title: `Pay deposit of ${kes(d.due_kes)} for ${d.project_title}`, text: `60% of the approved fee is due before work starts. Open invoice ${d.invoice_code} to pay.`, icon: 'wallet' })),
+    ...balances.filter(b=>!b.payment_notified).map(b=>({href:`/portal/projects/${b.project_code}?tab=operations`,title:`Pay remaining ${kes(b.due_kes)} for ${b.project_title}`,text:`Invoice ${b.invoice_code}. Your final report opens once this is settled.`,icon:'wallet'})),
+    ...projects.filter((p) => p.stage !== 'closed' && p.nda_status === 'prepared').map((p) => ({ href: `/portal/projects/${p.code}?tab=agreement`, title: `Sign the confidentiality agreement for ${p.title}`, text: 'Your agreement is ready. Review and sign it before fieldwork starts.', icon: 'review' })),
     ...toRead.map((r) => ({ href: `/portal/projects/${r.project_code}/reports/${r.id}`, title: `Your report is ready: ${r.project_title}`, text: 'Read the findings and our recommendation.', icon: 'report' })),
     ...(unread && unreadHref ? [{ href: unreadHref, title: `${unread} unread message${unread > 1 ? 's' : ''} from your analyst`, text: unread > 1 ? 'Opens the latest conversation. Others are marked in your projects and requests.' : 'Open the conversation to reply.', icon: 'message' }] : []),
   ]
@@ -133,22 +137,55 @@ export default async function Dashboard({ searchParams: searchParamsPromise }: {
       {searchParams.verified && <p className="alert alert-ok">Thank you, your email address is confirmed.</p>}
       {searchParams.verification_sent && <p className="alert alert-ok">We sent a new confirmation link to {user.email}.</p>}
 
+      {updates.length > 0 && (
+        <section className="panel" aria-labelledby="updates">
+          <div className="panel-head">
+            <h2 id="updates">New updates <span className="text-muted">({updateCount})</span></h2>
+            <form action={markAllReadAction}><button className="linkish text-sm" type="submit">Dismiss all</button></form>
+          </div>
+          <ul className="divide-y divide-line">
+            {updates.map((n) => (
+              <li key={n.id} className="flex items-start gap-3 px-6 py-3.5">
+                <span className="tile mt-0.5"><AppIcon name="bell" /></span>
+                <div className="min-w-0 flex-1">
+                  {n.href ? (
+                    <form action={openNotificationAction}>
+                      <input type="hidden" name="id" value={n.id} />
+                      <button type="submit" className="row-link__title cursor-pointer border-0 bg-transparent p-0 text-left hover:underline">{n.title}</button>
+                    </form>
+                  ) : <p className="row-link__title">{n.title}</p>}
+                  {n.body && <p className="mt-0.5 line-clamp-2 text-sm text-ink-2">{n.body}</p>}
+                  <p className="row-link__meta">{fmtDateTime(n.created_at, user.timezone ?? undefined)}</p>
+                </div>
+                <form action={dismissNotificationAction}>
+                  <input type="hidden" name="id" value={n.id} />
+                  <button type="submit" aria-label={`Dismiss: ${n.title}`} title="Dismiss" className="grid h-8 w-8 place-items-center rounded-full border-0 bg-transparent text-lg leading-none text-muted hover:bg-paper hover:text-ink">×</button>
+                </form>
+              </li>
+            ))}
+          </ul>
+          {updateCount > updates.length && <p className="border-t border-line px-6 py-3 text-sm"><NotificationButton variant="text">See all updates</NotificationButton></p>}
+        </section>
+      )}
+      {todo.length === 0 && projects.length>0 && updates.length === 0 && <p className="alert alert-ok">You are up to date. Nothing needs your action right now. We will show your next task here.</p>}
+      {[...deposits,...balances].some(d=>d.payment_notified)&&<p className="alert alert-info">Payment confirmation is with our team. You do not need to pay again while we check your reference.</p>}
       {todo.length > 0 && (
         <section className="panel" aria-labelledby="todo">
           <div className="panel-head">
-            <h2 id="todo">Needs your attention</h2>
+            <h2 id="todo">Your next actions</h2>
             <span className="chip chip--warn chip--plain">{todo.length} to do</span>
           </div>
+          <p className="px-6 pt-3 text-sm text-muted">Start with the first item. Each link takes you straight to the task.</p>
           <ul className="divide-y divide-line">
             {todo.map((t, index) => (
               <li key={t.href + t.title}>
-                <Link href={t.href} className="row-link py-4">
+                <Link href={t.href} className="row-link flex-wrap gap-y-2 py-4">
                   <span className={`tile ${index === 0 ? '' : 'tile--none'}`}><AppIcon name={t.icon} /></span>
-                  <span className="min-w-0 flex-1">
+                  <span className="min-w-0 flex-1 basis-48">
                     <span className="row-link__title">{t.title}</span>
                     <span className="mt-0.5 block text-sm text-ink-2">{t.text}</span>
                   </span>
-                  <AppIcon name="arrowRight" className="shrink-0 text-muted" />
+                  <span className="shrink-0 text-sm font-semibold">{index===0 ? 'Start here →' : 'Open →'}</span>
                 </Link>
               </li>
             ))}
@@ -176,7 +213,7 @@ export default async function Dashboard({ searchParams: searchParamsPromise }: {
         </section>
       ) : (
         <>
-          {hero ? <ProjectHero p={hero} /> : <AllCaughtUp completed={completed.length} />}
+          {hero ? <ProjectHero p={hero} steps={heroSteps} action={todo.find(t=>t.href.startsWith(`/portal/projects/${hero.code}`))} paymentPending={[...deposits,...balances].some(d=>d.project_code===hero.code&&d.payment_notified)} /> : <AllCaughtUp completed={completed.length} />}
 
           {projects.length > 0 && (
             <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4" aria-label="Summary">
@@ -228,7 +265,7 @@ export default async function Dashboard({ searchParams: searchParamsPromise }: {
                   <ul className="divide-y divide-line">
                     {openRequests.map((r) => (
                       <li key={r.id}>
-                        <Link href={`/portal/requests/${r.reference}`} className="row-link py-4">
+                        <Link href={`/portal/requests/${r.reference}`} className="row-link flex-wrap gap-y-2 py-4">
                           <span className="tile tile--info"><AppIcon name="inbox" /></span>
                           <span className="min-w-0 flex-1">
                             <span className="row-link__title">{r.title}</span>

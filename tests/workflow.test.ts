@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { clientNextStep, fieldworkProblem, filePermission, isTechnicalAuditEvent, projectTransitionProblem, reportContentProblems, requestStatusTargets, requestTransitionAllowed, staffNextStep, staffRequestNextStep } from '@/lib/workflow'
+import { clientNextStep, projectProgress, fieldworkProblem, filePermission, isTechnicalAuditEvent, projectTransitionProblem, reportContentProblems, requestStatusTargets, requestTransitionAllowed, staffNextStep, staffRequestNextStep } from '@/lib/workflow'
 import { uploadProblem } from '@/lib/upload-validation'
 
 const ready = { onboarding_submitted_at: new Date(), data_consent_at: new Date(), payment_status: 'paid', lead_analyst_id: 'lead' }
@@ -76,7 +76,9 @@ describe('staff next step', () => {
     expect(staffNextStep({ ...base, field_agent_id: null }, [], [], 0)?.tab).toBe('overview')
     expect(staffNextStep({ ...base, payment_status: 'awaiting_payment' }, [], [], 0)?.tab).toBe('operations')
     expect(staffNextStep(base, [], [], 0)?.title).toBe('Schedule the site visit')
-    expect(staffNextStep(base, [{ status: 'scheduled' }], [], 0)?.title).toBe('Fieldwork under way')
+    expect(staffNextStep(base, [{ status: 'scheduled' }], [], 0)?.title).toBe('Visit booked')
+    expect(staffNextStep(base, [{ status: 'scheduled', scheduled_for: null }], [], 0)?.title).toBe('Set the visit date')
+    expect(staffNextStep(base, [{ status: 'in_progress' }], [], 0)?.title).toBe('Fieldwork under way')
     expect(staffNextStep(base, [{ status: 'submitted' }], [], 0)?.title).toBe('Review the submitted inspection')
     expect(staffNextStep(base, [{ status: 'reviewed' }], [], 0)?.title).toBe('Write the report')
     expect(staffNextStep(base, [{ status: 'reviewed' }], [{ status: 'in_review' }], 0)?.tab).toBe('reports')
@@ -129,5 +131,24 @@ describe('staff request next step', () => {
     expect(staffRequestNextStep({ status: 'proposal_sent', owner_id: 'a' }, false).action).toBe('message')
     expect(staffRequestNextStep({ status: 'accepted', owner_id: 'a' }, false).action).toBe('project')
     expect(staffRequestNextStep({ status: 'closed', owner_id: 'a' }, false).action).toBeUndefined()
+  })
+})
+
+describe('project progress', () => {
+  const p = { code: 'AVP-1', stage: 'analysis' as const, service_code: 'due_diligence', service_name: 'Business Due Diligence', onboarding_submitted_at: new Date(), data_consent_at: new Date(), payment_status: 'deposit_received', nda_status: 'none', lead_analyst_id: 'a', field_agent_id: 'f' }
+  const current = (steps: ReturnType<typeof projectProgress>) => steps.find((s) => s.state === 'current')
+  it('points at the report once the evidence is checked, with the balance still to come', () => {
+    const steps = projectProgress(p, [{ status: 'reviewed', scheduled_for: '2026-11-11' }], [], 9300, (d) => d)
+    expect(current(steps)?.key).toBe('report')
+    expect(current(steps)?.owner).toBe('team')
+    expect(steps.find((s) => s.key === 'balance')).toMatchObject({ state: 'upcoming', detail: 'KES 9,300 to pay' })
+  })
+  it('asks the client for the balance once the report is published', () => {
+    const steps = projectProgress(p, [{ status: 'reviewed', scheduled_for: '2026-11-11' }], [{ status: 'published' }], 9300, (d) => d)
+    expect(current(steps)).toMatchObject({ key: 'balance', owner: 'client' })
+  })
+  it('starts with the client brief and finishes when the report can be read', () => {
+    expect(current(projectProgress({ ...p, onboarding_submitted_at: null }, [], [], 18800, (d) => d))?.key).toBe('brief')
+    expect(current(projectProgress(p, [{ status: 'reviewed', scheduled_for: '2026-11-11' }], [{ status: 'published' }], 0, (d) => d))).toBeUndefined()
   })
 })

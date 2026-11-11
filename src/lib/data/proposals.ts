@@ -1,4 +1,5 @@
 import 'server-only'
+import { requiredDeposit, standardPaymentTerms } from '@/lib/billing'
 import { sql } from '@/lib/db'
 import type { ProposalStatus } from '@/lib/labels'
 import { reconcileProjectPayment } from './operations'
@@ -72,8 +73,8 @@ export async function saveDraft(requestId: string, p: ProposalInput, actorId: st
       update proposals set
         title = ${p.title}, objectives = ${p.objectives}, scope_items = ${p.scopeItems}, deliverables = ${p.deliverables},
         exclusions = ${p.exclusions}, timeline = ${p.timeline}, line_items = ${sql.json(p.lineItems as never)},
-        total_kes = ${total(p.lineItems)}, payment_terms = ${p.paymentTerms}, valid_until = ${p.validUntil},
-        terms_version = ${p.termsVersion}, nda_offered = ${p.ndaOffered}, deposit_kes = ${p.depositKes ?? null}
+        total_kes = ${total(p.lineItems)}, payment_terms = ${standardPaymentTerms}, valid_until = ${p.validUntil},
+        terms_version = ${p.termsVersion}, nda_offered = ${p.ndaOffered}, deposit_kes = ${requiredDeposit(total(p.lineItems))}
       where id = ${draftId} and request_id = ${requestId} and status = 'draft'
       returning id`
     if (!row) throw new Error('Only drafts can be edited.')
@@ -84,8 +85,8 @@ export async function saveDraft(requestId: string, p: ProposalInput, actorId: st
       line_items, total_kes, payment_terms, valid_until, terms_version, nda_offered, created_by,deposit_kes)
     values (${requestId}, (select coalesce(max(version), 0) + 1 from proposals where request_id = ${requestId}),
       ${p.title}, ${p.objectives}, ${p.scopeItems}, ${p.deliverables}, ${p.exclusions}, ${p.timeline},
-      ${sql.json(p.lineItems as never)}, ${total(p.lineItems)}, ${p.paymentTerms}, ${p.validUntil}, ${p.termsVersion},
-      ${p.ndaOffered}, ${actorId},${p.depositKes ?? null})
+      ${sql.json(p.lineItems as never)}, ${total(p.lineItems)}, ${standardPaymentTerms}, ${p.validUntil}, ${p.termsVersion},
+      ${p.ndaOffered}, ${actorId},${requiredDeposit(total(p.lineItems))})
     returning id`
   return row.id
 }
@@ -142,7 +143,7 @@ export async function acceptProposal(id: string, clientId: string, acceptedName:
         returning id, code`
       if (project) {
         if (ndaRequested) await tx`update projects set nda_status='requested' where id=${project.id} and nda_status='none'`
-        await tx`insert into invoices(project_id,proposal_id,label,amount_kes,deposit_kes,created_by,line_items,due_on) values (${project.id},${p.id},${p.title},${p.total_kes},${p.deposit_kes ?? p.total_kes},${p.created_by ?? clientId},${tx.json(p.line_items ?? [])},current_date + 14)`
+        await tx`insert into invoices(project_id,proposal_id,label,amount_kes,deposit_kes,created_by,line_items,due_on,balance_on_delivery) values (${project.id},${p.id},${p.title},${p.total_kes},${p.deposit_kes ?? requiredDeposit(p.total_kes)},${p.created_by ?? clientId},${tx.json(p.line_items ?? [])},current_date + 14,true)`
         await reconcileProjectPayment(tx,project.id)
         return { project, requestId: p.request_id as string, proposal: p, followUp: true }
       }
@@ -157,7 +158,7 @@ export async function acceptProposal(id: string, clientId: string, acceptedName:
         ${r.claims}, ${r.concerns}, ${p.total_kes}, ${r.owner_id ?? p.created_by})
       returning id, code`
     if (ndaRequested) await tx`update projects set nda_status='requested' where id=${project.id}`
-    await tx`insert into invoices(project_id,proposal_id,label,amount_kes,deposit_kes,created_by,line_items,due_on) values (${project.id},${p.id},${p.title},${p.total_kes},${p.deposit_kes ?? p.total_kes},${p.created_by ?? clientId},${tx.json(p.line_items ?? [])},current_date + 14)`
+    await tx`insert into invoices(project_id,proposal_id,label,amount_kes,deposit_kes,created_by,line_items,due_on,balance_on_delivery) values (${project.id},${p.id},${p.title},${p.total_kes},${p.deposit_kes ?? requiredDeposit(p.total_kes)},${p.created_by ?? clientId},${tx.json(p.line_items ?? [])},current_date + 14,true)`
     await reconcileProjectPayment(tx,project.id)
     if (r.location_lat != null && r.location_lng != null) await tx`insert into project_sites(project_id,label,lat,lng,primary_site) values (${project.id},${r.location_label ?? 'Primary site'},${r.location_lat},${r.location_lng},true)`
     for (const location of (r.additional_locations ?? []) as {label:string;lat:number;lng:number}[]) await tx`insert into project_sites(project_id,label,lat,lng) values (${project.id},${location.label},${location.lat},${location.lng})`

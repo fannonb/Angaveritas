@@ -4,6 +4,7 @@ import { fieldworkProblem } from '@/lib/workflow'
 import type { ProjectRow } from './projects'
 import type postgres from 'postgres'
 import { emailInvoice } from '@/lib/invoice-send'
+import { invoiceRevisionProblem, requiredDeposit, type EditableInvoiceLine } from '@/lib/billing'
 
 /**
  * Recomputes the project payment status from the ledger. A status written later than the most
@@ -12,7 +13,7 @@ import { emailInvoice } from '@/lib/invoice-send'
  * invoice after it resumes automatic reconciliation. A waiver only gives way to a fully paid
  * ledger; a manager lifts it by choosing another status.
  */
-export async function reconcileProjectPayment(tx: postgres.TransactionSql, projectId: string) {
+export async function reconcileProjectPayment(tx: postgres.TransactionSql, projectId: string, force = false) {
   // Serialize totals across separate invoice payments on the same project.
   await tx`select id from projects where id=${projectId} for update`
   const [guard] = await tx<{ current: string; set_at: Date | null; ledger_at: Date | null }[]>`
@@ -21,17 +22,17 @@ export async function reconcileProjectPayment(tx: postgres.TransactionSql, proje
       (select max(pay.created_at) from payments pay join invoices inv on inv.id = pay.invoice_id where inv.project_id = ${projectId})
     ) as ledger_at
     from projects p where p.id = ${projectId}`
-  if (!guard || (guard.set_at && guard.set_at >= (guard.ledger_at ?? new Date(0)))) return
+  if (!guard || (!force && guard.set_at && guard.set_at >= (guard.ledger_at ?? new Date(0)))) return
   const totals = await tx`
-    select i.amount_kes,i.deposit_kes,coalesce((select sum(case when kind='payment' then amount_kes else -amount_kes end)::int from payments where invoice_id=i.id),0) paid from invoices i where project_id=${projectId} and status='issued'`
+    select i.amount_kes,i.deposit_kes,coalesce((select sum(case when kind='payment' then amount_kes else -amount_kes end)::int from payments where invoice_id=i.id),0) paid from invoices i where project_id=${projectId} and work_order_id=(select active_work_order_id from projects where id=${projectId}) and status='issued'`
   const status = totals.length && totals.every(i => i.paid >= i.amount_kes) ? 'paid' : totals.length && totals.every(i => i.paid >= i.deposit_kes) ? 'deposit_received' : 'awaiting_payment'
   if (guard.current === 'waived' && status !== 'paid') return
   await tx`update projects set payment_status=${status}, payment_status_set_at=now() where id=${projectId}`
 }
-export type Invoice = { id: string; code: string; label: string; amount_kes: number; deposit_kes: number; paid_kes: number; due_on: string | null; status: string; sent_at: Date | null; reminder_sent_at: Date | null; cancel_reason: string | null; created_at: Date }
+export type Invoice = { id: string; code: string; label: string; amount_kes: number; deposit_kes: number; paid_kes: number; due_on: string | null; status: string; sent_at: Date | null; reminder_sent_at: Date | null; cancel_reason: string | null; created_at: Date; revision: number; revision_reason: string | null }
 export async function projectOperations(projectId: string) {
   const [invoices, payments, requests, alerts, agreements, cycles, settings, notices, nextSeq] = await Promise.all([
-    sql<Invoice[]>`select i.*, coalesce((select sum(case when kind='payment' then amount_kes else -amount_kes end)::int from payments where invoice_id=i.id),0) paid_kes from invoices i where project_id=${projectId} order by created_at desc`,
+    sql<Invoice[]>`select i.*, invoice_due_on(i.id) due_on, coalesce((select sum(case when kind='payment' then amount_kes else -amount_kes end)::int from payments where invoice_id=i.id),0) paid_kes from invoices i where project_id=${projectId} order by created_at desc`,
     sql`select p.*, i.code invoice_code from payments p join invoices i on i.id=p.invoice_id where i.project_id=${projectId} order by p.created_at desc`,
     sql`select * from service_requests where project_id=${projectId} order by created_at desc`,
     sql`select * from project_alerts where project_id=${projectId} order by created_at desc`,
@@ -67,7 +68,7 @@ export async function projectOperations(projectId: string) {
 /** The first unpaid deposit on a project, or null when the visit is not waiting on payment. */
 export async function projectDepositDue(projectId: string) {
   const [row] = await sql<{ code: string; due_kes: number; payment_notified: boolean }[]>`
-    select code, due_kes,coalesce((select sum(amount_kes) from payment_notices where invoice_id=x.invoice_id and status='pending'),0)>=due_kes as payment_notified from (
+    select code, due_kes,(coalesce((select sum(amount_kes) from payment_notices where invoice_id=x.invoice_id and status='pending'),0)>=due_kes or exists(select 1 from paystack_attempts a where a.invoice_id=x.invoice_id and ((a.status in ('initializing','pending') and a.created_at > now() - interval '30 minutes') or (a.status='review' and a.reviewed_at is null)))) as payment_notified from (
       select i.id invoice_id,i.code, i.created_at,
         i.deposit_kes - coalesce((select sum(case when kind = 'payment' then amount_kes else -amount_kes end)::int from payments where invoice_id = i.id), 0) as due_kes
       from invoices i join projects p on p.id = i.project_id
@@ -105,18 +106,28 @@ export async function projectBalanceDue(projectId: string) {
   return row && row.total > 0 ? { total: row.total, codes: row.codes ?? '' } : null
 }
 
+// A Paystack checkout counts as "being checked" while it is open (30 minutes, as in checkout). An abandoned one must not hide the client's next step
+// for ever; the worker still reconciles it if the money arrives later.
+export async function projectPaymentPending(projectId:string) {
+  const [row]=await sql<{codes:string|null}[]>`select string_agg(i.code,', ' order by i.code) codes from invoices i where i.project_id=${projectId} and i.status='issued'
+    and (exists(select 1 from payment_notices n where n.invoice_id=i.id and n.status='pending')
+      or exists(select 1 from paystack_attempts a where a.invoice_id=i.id and ((a.status in ('initializing','pending') and a.created_at > now() - interval '30 minutes') or (a.status='review' and a.reviewed_at is null))))`
+  return row?.codes ?? null
+}
+
 /**
  * Clients open a project's published reports only once the balance is paid (or payment is waived).
  * Returns null when the reports are open, otherwise what is still owed and on which invoices.
  */
-export async function reportLock(projectId: string) {
-  const [open] = await sql<{ unlocked: boolean }[]>`select client_reports_unlocked(${projectId}) as unlocked`
+export async function reportLock(projectId: string, reportId?: string) {
+  const [work] = await sql<{id:string}[]>`select ${reportId ? sql`(select work_order_id from reports where id=${reportId} and project_id=${projectId})` : sql`active_work_order_id`} as id from projects where id=${projectId}`
+  const [open] = await sql<{ unlocked: boolean }[]>`select work_order_unlocked(${work?.id??null}) as unlocked`
   if (open?.unlocked) return null
   const [row] = await sql<{ owed: number; codes: string }[]>`
     select coalesce(sum(u.unpaid),0)::int as owed, coalesce(string_agg(u.code, ', ' order by u.code), '') as codes
     from (
       select i.code, i.amount_kes - coalesce((select sum(case when kind='payment' then amount_kes else -amount_kes end)::int from payments where invoice_id=i.id),0) as unpaid
-      from invoices i where i.project_id=${projectId} and i.status='issued'
+      from invoices i where i.project_id=${projectId} and i.work_order_id=${work?.id??null} and i.status='issued'
     ) u where u.unpaid > 0`
   return { owedKes: row?.owed ?? 0, codes: row?.codes ?? '' }
 }
@@ -138,6 +149,9 @@ export async function completeProjectByClient(projectId: string, clientId: strin
     if (!published) throw new Error('The report must be published before the project can be marked complete.')
     const [unlocked] = await tx<{ ok: boolean }[]>`select client_reports_unlocked(${projectId}) as ok`
     if (!unlocked?.ok) throw new Error('Pay the remaining balance before marking the project complete.')
+    if ((await tx`select 1 from workflow_cases where project_id=${projectId} and status in ('open','awaiting_client','accepted')`).length) throw new Error('Resolve the open requests before completing the project.')
+    if ((await tx`select 1 from reports where project_id=${projectId} and status in ('draft','in_review')`).length) throw new Error('A report is still being prepared.')
+    await tx`update work_orders set completed_at=now() where project_id=${projectId} and completed_at is null`
     await tx`update projects set stage = 'closed', closed_at = now() where id = ${projectId}`
   })
 }
@@ -169,11 +183,12 @@ export async function sendBalanceReminders(actorId: string | null, limit = 10) {
     select i.id, i.project_id
     from invoices i join projects p on p.id = i.project_id
     where i.status = 'issued' and p.stage <> 'closed' and p.payment_status <> 'waived'
-      and coalesce(i.due_on, i.created_at::date + 14) <= current_date + 3
+      and (not i.balance_on_delivery or exists(select 1 from reports r where r.work_order_id=i.work_order_id and r.status='published') or i.deposit_kes > coalesce((select sum(case when kind='payment' then amount_kes else -amount_kes end) from payments where invoice_id=i.id),0))
+      and invoice_due_on(i.id) <= current_date + 3 and invoice_due_amount(i.id)>0
       and (i.reminder_sent_at is null or i.reminder_sent_at < now() - interval '7 days')
       and i.amount_kes > coalesce((select sum(case when kind = 'payment' then amount_kes else -amount_kes end)::int from payments where invoice_id = i.id), 0)
       and not exists(select 1 from payment_notices n where n.invoice_id = i.id and n.status = 'pending')
-    order by coalesce(i.due_on, i.created_at::date + 14) limit ${limit}`
+    order by invoice_due_on(i.id) limit ${limit}`
   let sent = 0
   for (const pick of picks) {
     const claimed = await sql.begin(async tx => {
@@ -197,20 +212,26 @@ export async function sendBalanceReminders(actorId: string | null, limit = 10) {
 }
 
 /**
- * A manual (supplementary) invoice. Billing beyond the accepted contract value needs `beyondContract`,
- * so the accepted proposal's invoice is never issued twice by mistake.
+ * Supplemental billing requires the client's recorded acceptance of the exact fee and scope.
  */
-export async function issueInvoice(projectId: string, actorId: string, input: { label: string; amount: number; deposit: number; dueOn: string | null; beyondContract?: boolean }) {
-  if (!input.label.trim() || !Number.isSafeInteger(input.amount) || input.amount <= 0 || input.amount > 1e8 || !Number.isSafeInteger(input.deposit) || input.deposit < 0 || input.deposit > input.amount) throw new Error('Enter a description, positive total and deposit no greater than the total.')
+export async function issueInvoice(projectId: string, actorId: string, input: { label: string; amount: number; deposit?: number; dueOn: string | null; beyondContract?: boolean; acceptedCaseId?:string }) {
+  if (!input.label.trim() || !Number.isSafeInteger(input.amount) || input.amount <= 0 || input.amount > 1e8) throw new Error('Enter a description and a positive whole KES total.')
   return withActor(actorId, async tx => {
     const [billed] = await tx`select coalesce(p.contract_value_kes,0)::int contract,
       coalesce((select sum(amount_kes) from invoices where project_id=p.id and status='issued'),0)::int invoiced
       from projects p where p.id=${projectId} for update`
-    if (billed && billed.invoiced + input.amount > billed.contract && !input.beyondContract)
-      throw new Error(`This would bill KES ${(billed.invoiced + input.amount).toLocaleString('en-US')} against a contract of KES ${billed.contract.toLocaleString('en-US')}. Tick the box to confirm it is additional work, or cancel the duplicate invoice first.`)
+    let workId:string|null=null
+    if (input.acceptedCaseId || (billed && billed.invoiced + input.amount > billed.contract)) {
+      const [change]=await tx`select * from workflow_cases where id=${input.acceptedCaseId??null} and project_id=${projectId} and kind='scope_change' and status='accepted' and invoice_id is null for update`
+      if(!change||change.amount_kes!==input.amount)throw new Error('The client must accept this additional scope and exact fee before an invoice is issued.')
+      const [work]=await tx`insert into work_orders(project_id,title,scope,due_on) values(${projectId},${input.label},${change.detail},${change.proposed_date}) returning id`
+      workId=work.id
+      await tx`update projects set active_work_order_id=${workId},stage='planning',due_date=${change.proposed_date},contract_value_kes=coalesce(contract_value_kes,0)+${input.amount},closed_at=null where id=${projectId}`
+    }
     const label = input.label.trim()
-    const [invoice] = await tx`insert into invoices(project_id,label,amount_kes,deposit_kes,due_on,created_by,line_items)
-      values (${projectId},${label},${input.amount},${input.deposit},${input.dueOn},${actorId},${tx.json([{ label, amount: input.amount }])}) returning id`
+    const [invoice] = await tx`insert into invoices(project_id,work_order_id,label,amount_kes,deposit_kes,due_on,created_by,line_items,balance_on_delivery)
+      values (${projectId},${workId},${label},${input.amount},${requiredDeposit(input.amount)},${input.dueOn},${actorId},${tx.json([{ label, amount: input.amount }])},true) returning id`
+    if(workId)await tx`update workflow_cases set invoice_id=${invoice.id},status='resolved',resolved_at=now(),resolved_by=${actorId} where id=${input.acceptedCaseId!}`
     await reconcileProjectPayment(tx,projectId)
     return invoice.id as string
   })
@@ -225,9 +246,37 @@ export async function cancelInvoice(projectId: string, actorId: string, invoiceI
     const updated = await tx`update invoices set status='cancelled',cancelled_at=now(),cancelled_by=${actorId},cancel_reason=${reason.trim()}
       where id=${invoiceId} and project_id=${projectId} and status='issued' returning id`
     if (!updated.length) throw new Error('Invoice not found or already cancelled.')
+    await tx`update projects set active_work_order_id=(select work_order_id from invoices where project_id=${projectId} and status='issued' order by created_at desc limit 1)
+      where id=${projectId} and not exists(select 1 from invoices where work_order_id=projects.active_work_order_id and status='issued')
+      and exists(select 1 from invoices where project_id=${projectId} and status='issued')`
     await tx`update payment_notices set status='declined',reviewed_at=now(),reviewed_by=${actorId},response=${'Invoice cancelled: ' + reason.trim()}
       where invoice_id=${invoiceId} and status='pending'`
-    await reconcileProjectPayment(tx,projectId)
+    await reconcileProjectPayment(tx,projectId,true)
+  })
+}
+
+/** Keep agreed prices and received money intact; each edit is attributed and audited. */
+export async function reviseInvoice(projectId: string, actorId: string, input: {
+  invoiceId: string; revision: number; label: string; lines: EditableInvoiceLine[]; dueOn: string | null; reason: string
+}) {
+  if (!input.label.trim() || input.label.length > 200) throw new Error('Enter an invoice description.')
+  if (input.dueOn && (!/^\d{4}-\d{2}-\d{2}$/.test(input.dueOn) || !Number.isFinite(Date.parse(input.dueOn)))) throw new Error('Enter a valid due date.')
+  return withActor(actorId, async tx => {
+    const [invoice] = await tx`select * from invoices where id=${input.invoiceId} and project_id=${projectId} for update`
+    if (!invoice || invoice.status !== 'issued') throw new Error('Only an issued invoice can be edited.')
+    if (invoice.revision !== input.revision) throw new Error('This invoice changed while you were editing. Refresh to review the latest version.')
+    const problem = invoiceRevisionProblem(input.lines, invoice.approved_amount_kes, input.reason)
+    if (problem) throw new Error(problem)
+    const amount = input.lines.reduce((sum, l) => sum + l.amount, 0)
+    await tx`update invoices set label=${input.label.trim()}, line_items=${tx.json(input.lines)},
+      amount_kes=${amount}, deposit_kes=${requiredDeposit(amount)}, due_on=${input.dueOn},
+      revision=revision+1, revision_reason=${input.reason.trim()}, revised_at=now(), sent_at=null, reminder_sent_at=null
+      where id=${invoice.id}`
+    await reconcileProjectPayment(tx, projectId, true)
+    await tx`insert into events(actor_id,project_id,type,summary,client_visible)
+      values (${actorId},${projectId},'invoice.revised',${`Invoice ${invoice.code} revised to KES ${amount.toLocaleString('en-US')}: ${input.reason.trim()}`},true)`
+    const [project] = await tx`select client_id,code from projects where id=${projectId}`
+    await tx`insert into notifications(user_id,title,body,href) values (${project.client_id},${`Invoice ${invoice.code} updated`},${input.reason.trim()},${`/portal/projects/${project.code}/invoices/${invoice.id}`})`
   })
 }
 
@@ -286,15 +335,30 @@ export async function submitPaymentNotice(projectId: string, clientId: string, i
 export async function serviceRequest(projectId: string, actorId: string, kind: string, reason: string) {
   if (!['cancellation','monitoring_pause','monitoring_cancel','data_access','consent_withdrawal'].includes(kind) || reason.trim().length < 5) throw new Error('Choose a request type and explain what you need.')
   await withActor(actorId, async tx => {
+    const [p]=await tx`select * from projects where id=${projectId} for update`
     const existing = await tx`select 1 from service_requests where project_id=${projectId} and kind=${kind} and status='requested'`
     if (existing.length) throw new Error('A request of this type is already awaiting a response.')
     await tx`insert into service_requests(project_id,kind,reason,requested_by) values (${projectId},${kind},${reason},${actorId})`
+    if(kind==='consent_withdrawal') {
+      await tx`update projects set data_consent_at=null,monitoring_status='paused' where id=${projectId}`
+      await tx`update work_orders set hold_reason='Consent withdrawn by client' where project_id=${projectId} and completed_at is null`
+    }
+    if(kind==='cancellation') {
+      await tx`update work_orders set hold_reason='Cancellation requested; settlement pending' where project_id=${projectId} and completed_at is null`
+      await tx`update projects set monitoring_status='paused' where id=${projectId}`
+      await tx`insert into workflow_cases(project_id,work_order_id,kind,title,detail,created_by,assigned_to)
+        values(${projectId},${p.active_work_order_id},'cancellation','Cancellation and settlement',${reason},${actorId},${p.lead_analyst_id})`
+    }
+    if(kind==='monitoring_pause'||kind==='monitoring_cancel')await tx`update projects set monitoring_status='paused' where id=${projectId}`
   })
 }
 
 export async function resolveServiceRequest(projectId: string, actorId: string, id: string, status: 'completed' | 'declined', resolution: string) {
   if (resolution.trim().length < 5) throw new Error('Record the response and any refund or follow-up arrangements.')
   await withActor(actorId, async tx => {
+    const [pending]=await tx`select kind from service_requests where id=${id} and project_id=${projectId} for update`
+    if(pending?.kind==='cancellation')throw new Error('Use the cancellation case to agree and reconcile the settlement before closing.')
+    if(pending?.kind==='consent_withdrawal'&&status==='declined')throw new Error('Consent withdrawal cannot be declined. Only the client can renew consent.')
     const [r] = await tx`update service_requests set status=${status},resolution=${resolution},resolved_by=${actorId},resolved_at=now() where id=${id} and project_id=${projectId} and status='requested' returning kind`
     if (!r) throw new Error('Request no longer open.')
     if (status === 'completed') {
@@ -328,9 +392,10 @@ export async function generateMonitoringCycles(actorId: string) {
         await tx`update projects set next_cycle_on=greatest(next_cycle_on + ${p.monitoring_interval_days}::int,current_date + ${p.monitoring_interval_days}::int) where id=${p.id}`
         continue
       }
-      const [invoice] = await tx`insert into invoices(project_id,label,amount_kes,deposit_kes,due_on,created_by) values (${p.id},${`Monitoring cycle ${p.next_cycle_on}`},${p.monitoring_fee_kes},${p.monitoring_fee_kes},${p.next_cycle_on},${actorId}) returning id`
+      const [work]=await tx`insert into work_orders(project_id,title,scope,brief_snapshot) values(${p.id},${`Monitoring cycle ${p.next_cycle_on}`},${p.claims??'Agreed monitoring checks'},${tx.json(p.service_brief)}) returning id`
+      const [invoice] = await tx`insert into invoices(project_id,work_order_id,label,amount_kes,deposit_kes,due_on,created_by,balance_on_delivery) values (${p.id},${work.id},${`Monitoring cycle ${p.next_cycle_on}`},${p.monitoring_fee_kes},${requiredDeposit(p.monitoring_fee_kes)},${p.next_cycle_on},${actorId},true) returning id`
       await tx`insert into monitoring_cycles(project_id,cycle_on,invoice_id) values (${p.id},${p.next_cycle_on},${invoice.id})`
-      await tx`update projects set payment_status='awaiting_payment',payment_status_set_at=now(),next_cycle_on=greatest(next_cycle_on + ${p.monitoring_interval_days}::int,current_date + ${p.monitoring_interval_days}::int) where id=${p.id}`
+      await tx`update projects set next_cycle_on=greatest(next_cycle_on + ${p.monitoring_interval_days}::int,current_date + ${p.monitoring_interval_days}::int) where id=${p.id}`
       await tx`insert into notifications(user_id,title,href) values (${p.client_id},'Your next monitoring cycle is ready',${`/portal/projects/${p.code}?tab=operations`})`
       generated++
     }
@@ -343,14 +408,17 @@ export async function dispatchMonitoringCycle(projectId: string, actorId: string
     const [cycle] = await tx`select * from monitoring_cycles where id=${cycleId} and project_id=${projectId} for update`
     const [p] = await tx<ProjectRow[]>`select * from projects where id=${projectId} for update`
     if (!cycle || cycle.inspection_id) throw new Error('This cycle has already been dispatched or was not found.')
-    const [invoice]=await tx`select deposit_kes,coalesce((select sum(case when kind='payment' then amount_kes else -amount_kes end) from payments where invoice_id=i.id),0)::int paid from invoices i where i.id=${cycle.invoice_id} and i.status='issued'`
+    const [invoice]=await tx`select work_order_id,deposit_kes,coalesce((select sum(case when kind='payment' then amount_kes else -amount_kes end) from payments where invoice_id=i.id),0)::int paid from invoices i where i.id=${cycle.invoice_id} and i.status='issued'`
     if(!invoice || invoice.paid < invoice.deposit_kes) throw new Error('Record the cycle payment before dispatch.')
     const [plan] = await tx`select monitoring_status,monitoring_accepted_at,monitoring_accepted_version,monitoring_plan_version from projects where id=${projectId}`
     if (plan.monitoring_status !== 'active' || p.stage === 'closed') throw new Error('The monitoring plan is not active.')
     if (!plan.monitoring_accepted_at || plan.monitoring_accepted_version !== plan.monitoring_plan_version) throw new Error('The client must accept the current monitoring fee and frequency first.')
-    const problem = fieldworkProblem(p, p.field_agent_id)
+    await tx`update projects set active_work_order_id=${invoice.work_order_id},stage='planning' where id=${projectId}`
+    await reconcileProjectPayment(tx,projectId,true)
+    const [work]=await tx`select * from work_orders where id=${invoice.work_order_id}`
+    const problem = fieldworkProblem({...p,payment_status:invoice.paid>=invoice.deposit_kes?'deposit_received':p.payment_status,work_hold_reason:work.hold_reason,brief_approved:work.brief_approved_version===work.brief_version}, p.field_agent_id)
     if (problem) throw new Error(problem)
-    const [inspection] = await tx`insert into inspections(project_id,title,agent_id,scheduled_for,objectives,created_by) values (${projectId},${`Monitoring ${cycle.cycle_on}`},${p.field_agent_id},greatest(${cycle.cycle_on}::date,current_date),${p.claims},${actorId}) returning id`
+    const [inspection] = await tx`insert into inspections(project_id,work_order_id,title,agent_id,scheduled_for,objectives,created_by) values (${projectId},${invoice.work_order_id},${`Monitoring ${cycle.cycle_on}`},${p.field_agent_id},greatest(${cycle.cycle_on}::date,current_date),${work.scope},${actorId}) returning id`
     await tx`update monitoring_cycles set inspection_id=${inspection.id} where id=${cycle.id}`
   })
 }
@@ -366,8 +434,8 @@ export async function reissueCycleInvoice(projectId: string, actorId: string, cy
     if (cycle.inspection_id) throw new Error('This cycle was already dispatched.')
     const [old] = await tx`select * from invoices where id=${cycle.invoice_id} and status='cancelled'`
     if (!old) throw new Error('Only a cancelled cycle invoice can be reissued.')
-    const [invoice] = await tx`insert into invoices(project_id,label,amount_kes,deposit_kes,due_on,created_by,line_items)
-      values (${projectId},${old.label},${old.amount_kes},${old.deposit_kes},${cycle.cycle_on},${actorId},${tx.json([{ label: old.label, amount: old.amount_kes }])}) returning id`
+    const [invoice] = await tx`insert into invoices(project_id,work_order_id,label,amount_kes,deposit_kes,due_on,created_by,line_items,balance_on_delivery)
+      values (${projectId},${old.work_order_id},${old.label},${old.amount_kes},${old.deposit_kes},${cycle.cycle_on},${actorId},${tx.json([{ label: old.label, amount: old.amount_kes }])},true) returning id`
     await tx`update monitoring_cycles set invoice_id=${invoice.id} where id=${cycle.id}`
     await reconcileProjectPayment(tx,projectId)
     return invoice.id as string

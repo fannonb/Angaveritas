@@ -4,6 +4,7 @@ import { z } from 'zod'
 import { sql, withActor } from '@/lib/db'
 import { appUrl } from '@/lib/email'
 import { emailInvoice } from '@/lib/invoice-send'
+import { notifyTeam, notifyUser } from '@/lib/activity'
 import { reconcileProjectPayment } from './operations'
 import { checkoutAmount, checkoutResponse, PaymentError, paymentMismatch, paystackConfig, paystackEnabled, paystackRequest, transactionResponse, webhookEvent } from '@/lib/paystack'
 
@@ -24,6 +25,8 @@ export async function startPaystackCheckout(client: { id: string; email: string 
       where i.id=${invoiceId} and p.client_id=${client.id} and i.status='issued' for update of i`
     if (!invoice) throw new PaymentError('Invoice not found.', 404)
     if (invoice.payment_status === 'waived') throw new PaymentError('Payment has been waived for this project.')
+    if ((await tx`select 1 from payment_notices where invoice_id=${invoiceId} and status='pending' limit 1`).length)
+      throw new PaymentError('Your payment reference is being checked. Please wait for confirmation before paying again.')
     if ((await tx`select 1 from paystack_attempts where invoice_id=${invoiceId} and status='review' and reviewed_at is null`).length)
       throw new PaymentError('A previous payment needs review by your analyst before another payment can be opened.')
     const [balance] = await tx`select coalesce(sum(case when kind='payment' then amount_kes else -amount_kes end),0)::int paid from payments where invoice_id=${invoiceId}`
@@ -67,7 +70,9 @@ export async function reconcilePaystackTransaction(reference: string) {
   if (saved.status === 'success' || saved.status === 'review') return saved.status as string
   const actorId = await paymentActor()
   const payment = transactionResponse.parse(await paystackRequest(`/transaction/verify/${encodeURIComponent(reference)}`))
-  return withActor(actorId, async tx => {
+  let notCompleted: { invoiceId: string; amount: number } | null = null
+  let received: { invoiceId: string; amount: number } | null = null
+  const result = await withActor(actorId, async tx => {
     // Same invoice lock as manual reconciliation: a real late/duplicate charge is held for review.
     const [invoice] = await tx`select i.*,p.payment_status project_payment_status from invoices i join projects p on p.id=i.project_id
       where i.id=${saved.invoice_id} for update of i`
@@ -76,9 +81,13 @@ export async function reconcilePaystackTransaction(reference: string) {
     const mismatch = paymentMismatch({ reference, amount_minor: attempt.amount_minor, environment: attempt.environment, client_email: attempt.client_email }, payment)
     if (mismatch) return flagReview(tx, reference, mismatch)
     if (payment.status !== 'success') {
-      const status = ['failed','abandoned'].includes(payment.status) ? payment.status : payment.status === 'reversed' ? 'review' : 'pending'
+      // Paystack reports an unfinished checkout as abandoned straight away. Give the client the same 30 minutes
+      // the checkout stays open for before treating it as not completed.
+      const young = Date.now() - new Date(attempt.created_at).getTime() < 30 * 60 * 1000
+      const status = payment.status === 'failed' ? 'failed' : payment.status === 'abandoned' ? (young ? 'pending' : 'abandoned') : payment.status === 'reversed' ? 'review' : 'pending'
       await tx`update paystack_attempts set status=${status},checks=checks+1,next_check_at=now()+interval '5 minutes',
         last_error=${status === 'review' ? 'Transaction was reversed; staff reconciliation is required.' : null},updated_at=now() where reference=${reference}`
+      if (['failed', 'abandoned'].includes(status) && ['initializing', 'pending'].includes(attempt.status)) notCompleted = { invoiceId: invoice.id, amount: Number(attempt.amount_minor) / 100 }
       return status
     }
     const [totals] = await tx`select coalesce(sum(case when kind='payment' then amount_kes else -amount_kes end),0)::int paid from payments where invoice_id=${invoice.id}`
@@ -95,8 +104,35 @@ export async function reconcilePaystackTransaction(reference: string) {
     await reconcileProjectPayment(tx, invoice.project_id)
     await tx`insert into events(actor_id,project_id,type,summary,client_visible,data) values (${actorId},${invoice.project_id},'payment.received',
       ${`Payment of KES ${amount.toLocaleString('en-US')} received for ${invoice.code}.`},true,${tx.json({ provider: 'paystack', reference })})`
+    received = { invoiceId: invoice.id, amount }
     return 'success'
   })
+  // The team hears about money arriving through checkout the same way as a manual payment reference.
+  const paid = received as { invoiceId: string; amount: number } | null // set inside the transaction callback
+  if (paid) {
+    const [i] = await sql<{ code: string; project_code: string; title: string; client_name: string; lead_analyst_id: string | null; owed: number }[]>`
+      select i.code, p.code as project_code, p.title, c.full_name as client_name, p.lead_analyst_id,
+        i.amount_kes - coalesce((select sum(case when kind = 'payment' then amount_kes else -amount_kes end)::int from payments where invoice_id = i.id), 0) as owed
+      from invoices i join projects p on p.id = i.project_id join users c on c.id = p.client_id where i.id = ${paid.invoiceId}`
+    if (i) await notifyTeam({
+      title: `${i.project_code}: payment received, KES ${paid.amount.toLocaleString('en-US')}`,
+      body: `${i.client_name} paid ${i.code} through Paystack for "${i.title}". ${i.owed > 0 ? `KES ${i.owed.toLocaleString('en-US')} still to pay.` : 'The invoice is fully paid.'}`,
+      href: `/staff/projects/${i.project_code}?tab=operations`,
+      staffIds: [i.lead_analyst_id],
+    })
+  }
+  // Tell the client once, when a checkout first ends without payment, so they can try again.
+  const ended = notCompleted as { invoiceId: string; amount: number } | null // set inside the transaction callback
+  if (ended) {
+    const { invoiceId, amount } = ended
+    const [i] = await sql<{ code: string; project_code: string }[]>`select i.code, p.code as project_code from invoices i join projects p on p.id = i.project_id where i.id = ${invoiceId}`
+    if (i) await notifyUser(saved.client_id, {
+      title: `Payment not completed: ${i.code}`,
+      body: `Your payment of KES ${amount.toLocaleString('en-US')} did not go through, so nothing was recorded. You can try again from your invoice. If money left your account, reply with the reference ${reference}.`,
+      href: `/portal/projects/${i.project_code}?tab=operations`,
+    })
+  }
+  return result
 }
 
 async function flagReview(tx: Parameters<Parameters<typeof withActor>[1]>[0], reference: string, reason: string) {

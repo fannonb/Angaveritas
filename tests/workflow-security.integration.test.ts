@@ -17,7 +17,7 @@ import { createReport, updateReport, publishReport, setReportStatus } from '@/li
 import { acceptProposal, declineProposal } from '@/lib/data/proposals'
 import { assignProjectTeam } from '@/lib/data/projects'
 import { setDisabled, setStaffRole } from '@/lib/data/users'
-import { listMessages, postMessage, markRead, clientUnreadCount, threadsAwaitingReply } from '@/lib/data/messages'
+import { listMessages, postMessage, markRead, clientUnreadCount, threadsAwaitingReply, dismissReply } from '@/lib/data/messages'
 import { submitPaymentNotice, recordPayment, configureMonitoring, generateMonitoringCycles, issueInvoice, completeProjectByClient, reopenProject } from '@/lib/data/operations'
 import { staffWorkQueue } from '@/lib/data/workqueue'
 import { adminAttention } from '@/lib/data/attention'
@@ -27,8 +27,8 @@ import { clientPayments } from '@/lib/data/payments'
 const schema = `av_test_security_${Date.now()}`
 let client: string, agent: string, analyst: string, admin: string
 async function fixture() {
-  const [p] = await state.sql`insert into projects(client_id,title,data_consent_at,onboarding_submitted_at,payment_status,lead_analyst_id,field_agent_id,stage)
-    values (${client},'Security regression',now(),now(),'paid',${analyst},${agent},'planning') returning id`
+  const [p] = await state.sql`insert into projects(client_id,title,data_consent_at,onboarding_submitted_at,payment_status,lead_analyst_id,field_agent_id,stage,contract_value_kes)
+    values (${client},'Security regression',now(),now(),'paid',${analyst},${agent},'planning',100000) returning id`
   const [i] = await state.sql`insert into inspections(project_id,title,agent_id) values (${p.id},'Visit',${agent}) returning id`
   const [e] = await state.sql`insert into files(project_id,inspection_id,category,media_type,filename,mime,size_bytes,storage_key,status,sha256,uploaded_by)
     values (${p.id},${i.id},'evidence','photo','photo.jpg','image/jpeg',3,${`test/${i.id}`},'ready','hash',${agent}) returning id`
@@ -103,14 +103,14 @@ describe.skipIf(process.env.RUN_DATABASE_TESTS !== '1')('workflow boundary regre
     })
     await state.sql`update inspections set status='submitted' where id=${x.i}`
     await expect(state.sql`update inspections set status='reviewed',reviewed_by=${analyst} where id=${x.i}`).rejects.toThrow(/independent/i)
-    await state.sql`update inspections set status='reviewed',reviewed_by=${admin} where id=${x.i}`
+    await state.sql`update inspections set status='reviewed',reviewed_by=${admin},review_exception='Admin exception: checked every source; no separate reviewer available' where id=${x.i}`
     expect((await state.sql`select status from inspections where id=${x.i}`)[0].status).toBe('reviewed')
   })
   it('lets an admin review a visit they carried out themselves', async () => {
     const x = await fixture()
     await state.sql`update inspections set agent_id=${admin} where id=${x.i}`
     await state.sql`update inspections set status='submitted' where id=${x.i}`
-    await state.sql`update inspections set status='reviewed',reviewed_by=${admin} where id=${x.i}`
+    await state.sql`update inspections set status='reviewed',reviewed_by=${admin},review_exception='Admin exception: checked every source; no separate reviewer available' where id=${x.i}`
     expect((await state.sql`select status from inspections where id=${x.i}`)[0].status).toBe('reviewed')
   })
   it('rejects pending upload completion after the inspection is reassigned', async () => {
@@ -130,7 +130,7 @@ describe.skipIf(process.env.RUN_DATABASE_TESTS !== '1')('workflow boundary regre
     await setReportStatus(r, 'in_review', analyst)
     const [p] = await state.sql`select * from projects where id=${x.p}`
     await expect(publishReport(r, { id: analyst, full_name: 'Analyst', role: 'analyst' }, p as never)).rejects.toThrow(/admin/i)
-    await publishReport(r, { id: admin, full_name: 'Admin', role: 'admin' }, p as never)
+    await publishReport(r, { id: admin, full_name: 'Admin', role: 'admin' }, p as never, 'Admin exception: verified each source against scope')
     expect((await state.sql`select status from reports where id=${r}`)[0].status).toBe('published')
   })
   it('keeps a published report and its evidence locked until the balance is paid', async () => {
@@ -142,7 +142,7 @@ describe.skipIf(process.env.RUN_DATABASE_TESTS !== '1')('workflow boundary regre
     await updateReport(r, { title: 'Locked report', inspectionId: x.i, executiveSummary: 'Summary', overallStatus: 'ok', recommendedDecision: 'Proceed', recommendations: 'Monitor', limitations: 'Visit only', scope: 'Existence', methodology: 'Photos', pdfFileId: null }, analyst)
     await setReportStatus(r, 'in_review', analyst)
     const [p] = await state.sql`select * from projects where id=${x.p}`
-    await publishReport(r, { id: admin, full_name: 'Admin', role: 'admin' }, p as never)
+    await publishReport(r, { id: admin, full_name: 'Admin', role: 'admin' }, p as never, 'Admin exception: verified each source against scope')
     const evidenceReadable = async () => mayReadFile({ id: client, role: 'client' }, (await getFile(x.e))!)
     expect(await evidenceReadable()).toBe(true)
     const invoiceId = await issueInvoice(x.p, admin, { label: 'Balance', amount: 1000, deposit: 0, dueOn: null, beyondContract: true })
@@ -161,7 +161,7 @@ describe.skipIf(process.env.RUN_DATABASE_TESTS !== '1')('workflow boundary regre
     await updateReport(r, { title: 'Finished report', inspectionId: x.i, executiveSummary: 'Summary', overallStatus: 'ok', recommendedDecision: 'Proceed', recommendations: 'Monitor', limitations: 'Visit only', scope: 'Existence', methodology: 'Photos', pdfFileId: null }, analyst)
     await setReportStatus(r, 'in_review', analyst)
     const [p] = await state.sql`select * from projects where id=${x.p}`
-    await publishReport(r, { id: admin, full_name: 'Admin', role: 'admin' }, p as never)
+    await publishReport(r, { id: admin, full_name: 'Admin', role: 'admin' }, p as never, 'Admin exception: verified each source against scope')
     const stage = async () => (await state.sql`select stage from projects where id=${x.p}`)[0].stage
     expect(await stage()).toBe('delivered')
     const invoiceId = await issueInvoice(x.p, admin, { label: 'Balance', amount: 1000, deposit: 0, dueOn: null, beyondContract: true })
@@ -218,7 +218,7 @@ describe.skipIf(process.env.RUN_DATABASE_TESTS !== '1')('workflow boundary regre
     await updateReport(r, { title: 'Admin report', inspectionId: x.i, executiveSummary: 'Summary', overallStatus: 'ok', recommendedDecision: 'Proceed', recommendations: 'Monitor', limitations: 'Visit only', scope: 'Existence', methodology: 'Photos', pdfFileId: null }, admin)
     await setReportStatus(r, 'in_review', admin)
     const [p] = await state.sql`select * from projects where id=${x.p}`
-    await publishReport(r, { id: admin, full_name: 'Admin', role: 'admin' }, p as never)
+    await publishReport(r, { id: admin, full_name: 'Admin', role: 'admin' }, p as never, 'Admin exception: verified each source against scope')
     expect((await state.sql`select status from reports where id=${r}`)[0].status).toBe('published')
   })
   it('keeps closed requests closed when a client declines an old proposal', async () => {
@@ -307,6 +307,17 @@ describe.skipIf(process.env.RUN_DATABASE_TESTS !== '1')('workflow boundary regre
     await expect(state.sql`update inspections set status='submitted' where id=${x.i}`).rejects.toThrow(/correction/i)
     await state.sql`update inspection_corrections set resolved_at=now(),resolved_by=${agent},resolution='Access limitation explained' where inspection_id=${x.i}`
     await state.sql`update inspections set status='submitted' where id=${x.i}`
+  })
+  it('lets staff clear a message that needs no reply, until the client writes again', async () => {
+    const x = await fixture()
+    await postMessage({projectId:x.p},client,'Thank you',false)
+    const waiting = (await threadsAwaitingReply()).find(t => t.project_id===x.p)!
+    expect(waiting).toBeTruthy()
+    await dismissReply(waiting.thread, waiting.last_at, analyst)
+    expect((await threadsAwaitingReply()).some(t => t.project_id===x.p)).toBe(false)
+    await new Promise(r => setTimeout(r, 10))
+    await postMessage({projectId:x.p},client,'Actually, one more question',false)
+    expect((await threadsAwaitingReply()).some(t => t.project_id===x.p)).toBe(true)
   })
   it('keeps one conversation across acceptance, preserving internal privacy and reply state', async () => {
     const x = await fixture()

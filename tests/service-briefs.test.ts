@@ -24,6 +24,16 @@ describe('service briefs', () => {
       expect(validateServiceBrief(profile,answers,true).brief?.profile).toBe(profile.code)
     }
   })
+  it('requires each section in order while allowing later sections to remain unanswered', () => {
+    for (const profile of Object.values(briefProfiles)) {
+      const first = Object.fromEntries(profile.fields.filter(f=>f.required && f.step===0).map(f=>[f.key,f.options?.[0]??'Client context']))
+      expect(validateServiceBrief(profile,{},true,0).error).toBeTruthy()
+      expect(validateServiceBrief(profile,first,true,0).error).toBeUndefined()
+      expect(validateServiceBrief(profile,first,true,1).error).toBeTruthy()
+      const both = {...first,...Object.fromEntries(profile.fields.filter(f=>f.required && f.step===1).map(f=>[f.key,f.options?.[0]??'Checks needed']))}
+      expect(validateServiceBrief(profile,both,true,1).error).toBeUndefined()
+    }
+  })
   it('rejects malformed answers even when saving a draft, and ignores unrecognised fields', () => {
     const p=briefProfiles.supplier_verification
     for (const raw of [{website:'javascript:alert(1)'},{relationship:'forged option'},{decision_date:'2026-02-30'},{supplier_name:'x'.repeat(2001)}])

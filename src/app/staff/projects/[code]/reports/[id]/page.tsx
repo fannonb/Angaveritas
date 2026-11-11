@@ -8,7 +8,7 @@ import { listProjectFiles } from '@/lib/data/files'
 import { listFindings, listInspections, listProjectFindings } from '@/lib/data/inspections'
 import { projectByCodeFor } from '@/lib/data/projects'
 import { getReport } from '@/lib/data/reports'
-import { reportStatusAction } from '../../../../actions'
+import { discardReportDraftAction, reportStatusAction } from '../../../../actions'
 import ReportEditor from './ReportEditor'
 
 export const metadata = { title: 'Report' }
@@ -43,14 +43,24 @@ export default async function StaffReport({ params: paramsPromise, searchParams:
       </div>
 
       <section className="panel panel-pad space-y-3">
-        <h2 className="text-lg">Quality review</h2>
-        {r.status === 'draft' && <p className="text-ink-2">Write the report, then submit it for review. An admin approves it before the client sees it.</p>}
+        <h2 className="text-lg">Quality review</h2>{r.status==='published'&&<a className="btn btn-primary btn-small" href={`/api/reports/${r.id}/pdf`}>Download approved report PDF</a>}
+        {r.status === 'draft' && <>
+          <p className="text-ink-2">{user.role === 'admin' ? 'Write the report, then publish it. As an admin your approval is the review, so it goes to the client straight away.' : 'Write the report, then submit it for review. An admin approves it before the client sees it.'}</p>
+          <details className="text-sm">
+            <summary className="cursor-pointer text-muted">Discard this draft</summary>
+            <form action={discardReportDraftAction} className="mt-2 flex flex-wrap items-center gap-3">
+              <input type="hidden" name="reportId" value={r.id} />
+              <span className="text-ink-2">The draft and its wording are removed. Use this for a duplicate or a report started by mistake.</span>
+              <button className="btn btn-danger btn-small" type="submit">Discard draft</button>
+            </form>
+          </details>
+        </>}
         {r.status === 'in_review' && (
           <div className="flex flex-wrap items-end gap-3">
             {canPublish ? (
               <form action={reportStatusAction}>
                 <input type="hidden" name="reportId" value={r.id} />
-                <input type="hidden" name="to" value="published" />
+                <input type="hidden" name="to" value="published" /><label className="label">Admin exception reason (only if you contributed to this work)<textarea className="input" name="reviewException" minLength={10} maxLength={2000}/></label>
                 <button className="btn btn-primary" type="submit">Approve and publish to client</button>
               </form>
             ) : (
@@ -59,7 +69,7 @@ export default async function StaffReport({ params: paramsPromise, searchParams:
             <form action={reportStatusAction} className="flex flex-wrap items-end gap-2">
               <input type="hidden" name="reportId" value={r.id} />
               <input type="hidden" name="to" value="draft" />
-              <label className="label">Return with a note<input className="input mt-1 w-72" name="note" maxLength={1000} placeholder="What needs changing" /></label>
+              <label className="label">Return with a note<input className="input mt-1 w-72" name="note" required minLength={10} maxLength={1000} placeholder="What needs changing" /></label>
               <button className="btn btn-secondary" type="submit">Return to draft</button>
             </form>
           </div>
@@ -67,12 +77,12 @@ export default async function StaffReport({ params: paramsPromise, searchParams:
         {r.status === 'published' && (
           <div className="flex flex-wrap items-end justify-between gap-x-8 gap-y-4">
             <p className="text-ink-2 min-w-0 max-w-[40rem]">Published {fmtDateTime(r.published_at)}{r.reviewer_name ? `, approved by ${r.reviewer_name}` : ''}.{r.client_rating ? ` Client rating: ${r.client_rating}/5${r.client_feedback ? `, “${r.client_feedback}”` : ''}.` : ''}</p>
-            <form action={reportStatusAction} className="flex flex-wrap items-end gap-3">
+            {user.role === 'admin' && <form action={reportStatusAction} className="flex flex-wrap items-end gap-3">
               <input type="hidden" name="reportId" value={r.id} />
               <input type="hidden" name="to" value="withdrawn" />
               <label className="label">Withdrawal reason<input className="input" name="note" required maxLength={1000} /></label>
               <button className="btn btn-danger btn-small" type="submit">Withdraw</button>
-            </form>
+            </form>}
           </div>
         )}
         {r.status === 'withdrawn' && <div className="space-y-3"><p className="text-ink-2">Withdrawn: {r.withdrawal_reason}. Create a corrected version.</p>
@@ -89,6 +99,7 @@ export default async function StaffReport({ params: paramsPromise, searchParams:
               r={r}
               inspections={inspections.filter(i => i.status === 'reviewed').map((i) => ({ id: i.id, code: i.code, title: i.title }))}
               pdfs={pdfs.map((f) => ({ id: f.id, filename: f.filename }))}
+              publish={user.role === 'admin'}
             />
           </section>
         )}

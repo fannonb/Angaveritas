@@ -25,21 +25,21 @@ const setIntent = (e: React.MouseEvent<HTMLButtonElement>, v: string) => {
   if (field) field.value = v
 }
 
-function Buttons({ canSubmit }: { canSubmit: boolean }) {
+function Buttons({ canSubmit, publish }: { canSubmit: boolean; publish: boolean }) {
   const { pending } = useFormStatus()
   return (
     <div className="flex flex-wrap justify-end gap-3">
       <button className="btn btn-secondary" type="submit" disabled={pending} onClick={(e) => setIntent(e, 'save')}>Save</button>
       {canSubmit && (
-        <button className="btn btn-primary" type="submit" disabled={pending} onClick={(e) => setIntent(e, 'submit')}>
-          {pending ? 'Working…' : 'Save and submit for review'}
+        <button className="btn btn-primary" type="submit" disabled={pending} onClick={(e) => setIntent(e, publish ? 'publish' : 'submit')}>
+          {pending ? 'Working…' : publish ? 'Save and publish to client' : 'Save and submit for review'}
         </button>
       )}
     </div>
   )
 }
 
-export default function ReportEditor({ r, inspections, pdfs }: { r: R; inspections: { id: string; code: string; title: string }[]; pdfs: { id: string; filename: string }[] }) {
+export default function ReportEditor({ r, inspections, pdfs, publish = false }: { r: R; inspections: { id: string; code: string; title: string }[]; pdfs: { id: string; filename: string }[]; publish?: boolean }) {
   const [state, action] = useActionState<StaffState, FormData>(saveReportAction, null)
   return (
     <form action={action} className="space-y-4">
@@ -96,7 +96,7 @@ export default function ReportEditor({ r, inspections, pdfs }: { r: R; inspectio
       </label>
       {state?.error && <p role="alert" className="alert alert-bad">{state.error}</p>}
       {state?.ok && <p role="status" className="alert alert-ok">{state.message}</p>}
-      <Buttons canSubmit={r.status === 'draft'} />
-    </form>
+      <Buttons canSubmit={r.status === 'draft'} publish={publish} />
+    <label className="label">Admin exception reason (publishing your own work)<textarea className="input" name="reviewException" minLength={10} maxLength={2000} placeholder="Explain why independent review is unavailable and how you checked the report"/></label></form>
   )
 }

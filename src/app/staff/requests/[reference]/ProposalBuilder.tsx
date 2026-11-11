@@ -1,5 +1,6 @@
 'use client'
 
+import { requiredDeposit, standardPaymentTerms } from '@/lib/billing'
 import { useActionState, useState } from 'react'
 import { useFormStatus } from 'react-dom'
 import type { LineItem } from '@/lib/data/proposals'
@@ -91,9 +92,9 @@ export default function ProposalBuilder({ requestId, d }: { requestId: string; d
       </div>
       <label className="label">
         Payment terms
-        <textarea className="input min-h-[4.5rem]" name="paymentTerms" defaultValue={d.paymentTerms} required maxLength={1000} />
+        <textarea className="input min-h-[4.5rem]" name="paymentTerms" value={standardPaymentTerms} readOnly required maxLength={1000} />
       </label>
-      <label className="label">Required deposit KES (leave blank for payment in full)<input className="input" name="depositKes" type="number" min="0" max={Math.max(0,total)} defaultValue={d.depositKes ?? ''} /><span className="hint">Keep this amount consistent with the written payment terms.</span></label>
+      <div className="alert alert-info"><strong>Deposit (60%): KES {requiredDeposit(total).toLocaleString('en-US')}</strong><p className="text-sm">Remaining balance: KES {(total-requiredDeposit(total)).toLocaleString('en-US')}, due before the final report is released. The deposit updates automatically when price lines or discounts change.</p></div>
       <label className="check"><input type="checkbox" name="ndaOffered" defaultChecked={d.ndaOffered} /> Offer a separate NDA</label>
 
       {state?.errors && (

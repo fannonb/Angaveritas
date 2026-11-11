@@ -30,7 +30,12 @@ const password = process.env.WORKFLOW_TEST_PASSWORD || fs.readFileSync('ACCESS.m
 if (!password) throw new Error('Set WORKFLOW_TEST_PASSWORD to the local demo account password.')
 const users = {}
 const pages = {}
-async function field(page, name, value) { await page.locator(`[name="${name}"]`).fill(value) }
+// Optional answers sit in collapsed sections; open the one around a field before filling it, as a person would.
+async function field(page, name, value) {
+  const input = page.locator(`[name="${name}"]`)
+  await input.evaluate((el) => el.closest("details")?.setAttribute("open", ""))
+  await input.fill(value)
+}
 async function click(page, label) {
   const button = page.getByRole('button', { name: label, exact: true })
   let responseError
@@ -132,9 +137,10 @@ try {
     await row.getByRole('button',{name:'Disable',exact:true}).waitFor()
     assert.equal((await db`select disabled_at from users where id=${staff.id}`)[0].disabled_at,null)
   })
-  await check('analyst pricing is read-only; admin can change public pricing visibility', async () => {
+  await check('pricing is admin-only; admin can change public pricing visibility', async () => {
     await analyst.goto(origin+'/staff/pricing')
-    assert.equal(await analyst.getByRole('button',{name:'Save as new version',exact:true}).count(),0)
+    assert.match(analyst.url(),/\/staff\?denied=1$/)
+    assert.equal(await analyst.getByRole('link',{name:'Pricing',exact:true}).count(),0)
     const before=(await db`select value from site_settings where key='showPublicPrices'`)[0]?.value
     await admin.goto(origin+'/staff/pricing')
     const toggle=admin.getByRole('button',{name:/^(Show|Hide) prices$/})
@@ -161,7 +167,7 @@ try {
     await qualify.locator('[name="ownerId"]').selectOption(users.analyst.id)
     await qualify.getByRole('button').click()
     await analyst.waitForLoadState('networkidle')
-    for (const [name,value] of Object.entries({ objectives:'Verify existence and site access', scope:'Site visit\nEvidence capture', deliverables:'Reviewed report', timeline:'5 working days', paymentTerms:'KES 3000 deposit before fieldwork', depositKes:'3000' }))
+    for (const [name,value] of Object.entries({ objectives:'Verify existence and site access', scope:'Site visit\nEvidence capture', deliverables:'Reviewed report', timeline:'5 working days' }))
       await field(analyst,name,value)
     await analyst.locator('[name="li_label"]').first().fill('Site verification')
     await analyst.locator('[name="li_amount"]').first().fill('10000')
@@ -178,17 +184,17 @@ try {
     assert.ok(p)
     code=p.code; projectId=p.id
     const [invoice] = await db`select * from invoices where project_id=${projectId}`
-    assert.equal(invoice.deposit_kes, 3000)
+    assert.equal(invoice.deposit_kes, 6000) // the standard 60% deposit on KES 10,000
     assert.equal(invoice.amount_kes, 10000)
   })
   await check('client completes onboarding and uploads a document', async () => {
     await field(client,'service.subject','Physical existence and site access')
     await field(client,'locationLabel','Kitengela')
     await field(client,'siteAccessNotes','Meet at the main gate in Kitengela.')
-    await click(client,'Continue')
+    await click(client,'Save and continue')
     await field(client,'service.outcomes','Decide whether to proceed with the investment.')
     await field(client,'claims','The site exists and has road access.')
-    await click(client,'Continue')
+    await click(client,'Save and continue')
     await client.locator('[name="consent"]').check()
     await click(client,'Send engagement brief')
     assert.equal((await db`select stage from projects where id=${projectId}`)[0].stage,'planning')
@@ -221,15 +227,16 @@ try {
     await team.getByRole('button',{name:'Save team',exact:true}).click()
     await analyst.waitForLoadState('networkidle')
     await analyst.goto(origin+`/staff/projects/${code}?tab=inspections`)
-    await click(analyst,'Schedule')
+    await analyst.locator('[name="scheduledFor"]').fill('2030-01-15')
+    await click(analyst,'Schedule and notify client')
     assert.equal((await db`select id from inspections where project_id=${projectId}`).length,0)
     assert.match(await analyst.locator('body').innerText(),/payment/i)
   })
   await check('client sends payment reference without changing the paid balance', async () => {
     await client.goto(origin+`/portal/projects/${code}?tab=operations`)
-    await client.getByText('I have paid',{exact:true}).click()
+    await client.getByText('Paying by bank transfer or M-Pesa instead?',{exact:true}).click()
     const form=client.locator('form').filter({has:client.locator('[name="operation"][value="payment_notice"]')})
-    await form.locator('[name="amount"]').fill('3000')
+    await form.locator('[name="amount"]').fill('6000')
     await form.locator('[name="reference"]').fill('E2E-DEPOSIT-001')
     await click(client,'Send payment reference')
     assert.equal((await db`select payment_status from projects where id=${projectId}`)[0].payment_status,'awaiting_payment')
@@ -245,7 +252,8 @@ try {
   })
   await check('requested NDA blocks scheduling until the client signs the prepared agreement', async () => {
     await analyst.goto(origin+`/staff/projects/${code}?tab=inspections`)
-    await click(analyst,'Schedule')
+    await analyst.locator('[name="scheduledFor"]').fill('2030-01-15')
+    await click(analyst,'Schedule and notify client')
     assert.equal((await db`select id from inspections where project_id=${projectId}`).length,0)
     assert.match(await analyst.locator('body').innerText(),/confidentiality/i)
     const document=Buffer.from('%PDF-1.4\nLocal workflow agreement fixture\n%%EOF')
@@ -260,16 +268,25 @@ try {
     await client.locator('[name="agree"]').check()
     await click(client,'Accept and sign')
     assert.equal((await db`select nda_status from projects where id=${projectId}`)[0].nda_status,'signed')
+    // Work starts only once the analyst has checked the submitted brief against the accepted scope.
+    await analyst.goto(origin+`/staff/projects/${code}?tab=overview`)
+    await analyst.getByLabel('I checked the submitted brief against the accepted scope and contact restrictions.').check()
+    await click(analyst,'Approve brief for planning')
+    assert.ok((await db`select brief_approved_at from work_orders where project_id=${projectId}`)[0].brief_approved_at)
     await analyst.goto(origin+`/staff/projects/${code}?tab=inspections`)
-    await click(analyst,'Schedule')
+    await analyst.locator('[name="scheduledFor"]').fill('2030-01-15')
+    await click(analyst,'Schedule and notify client')
     inspectionId=(await db`select id from inspections where project_id=${projectId}`)[0].id
   })
   await check('agent records evidence and findings on mobile; submits for independent review', async () => {
     await agent.goto(origin+`/staff/inspections/${inspectionId}`)
-    await click(agent,'Start the visit')
+    assert.equal(await agent.getByRole('button',{name:'Start the visit',exact:true}).count(),0)
     const image=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jY9sAAAAASUVORK5CYII=','base64')
     const start=await api(agent,'/api/files',{projectId,inspectionId,category:'evidence',filename:'site.png',mime:'image/png',size:image.length})
     assert.equal(start.status,201)
+    // The first photo starts the visit and moves the project into fieldwork.
+    assert.equal((await db`select status from inspections where id=${inspectionId}`)[0].status,'in_progress')
+    assert.equal((await db`select stage from projects where id=${projectId}`)[0].stage,'fieldwork')
     evidenceId=start.body.fileId
     assert.equal((await agent.request.put(origin+start.body.upload.url,{headers:{Origin:origin,'Content-Type':'image/png'},data:image})).status(),200)
     assert.equal((await api(agent,`/api/files/${evidenceId}/complete`,{})).status,200)
@@ -366,9 +383,9 @@ try {
     assert.doesNotMatch(await client.locator('body').innerText(),/physical site and road access were verified/i)
     assert.match(await client.locator('body').innerText(),/remaining balance/i)
     await client.goto(origin+`/portal/projects/${code}?tab=operations`)
-    await client.getByText('I have paid',{exact:true}).click()
+    await client.getByText('Paying by bank transfer or M-Pesa instead?',{exact:true}).click()
     const balanceForm=client.locator('form').filter({has:client.locator('[name="operation"][value="payment_notice"]')})
-    await balanceForm.locator('[name="amount"]').fill('7000')
+    await balanceForm.locator('[name="amount"]').fill('4000') // KES 10,000 less the 6,000 deposit
     await balanceForm.locator('[name="reference"]').fill('E2E-BALANCE-001')
     await click(client,'Send payment reference')
     await admin.goto(origin+`/staff/projects/${code}?tab=operations`)
@@ -405,7 +422,7 @@ try {
     await client.waitForURL(/\/portal\/requests\/AVR-/)
     const followUp=new URL(client.url()).pathname.split('/').pop()
     await analyst.goto(origin+`/staff/requests/${followUp}`)
-    for(const [name,value] of Object.entries({objectives:'Repeat verification of site access',timeline:'5 working days',paymentTerms:'KES 1000 deposit before follow-up',depositKes:'1000'})) await field(analyst,name,value)
+    for(const [name,value] of Object.entries({objectives:'Repeat verification of site access',timeline:'5 working days'})) await field(analyst,name,value)
     await click(analyst,'Save and send to client')
     await client.goto(origin+`/portal/requests/${followUp}`)
     await field(client,'acceptedName',users.client.full_name)

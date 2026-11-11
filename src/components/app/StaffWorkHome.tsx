@@ -1,17 +1,18 @@
 import Link from 'next/link'
 import { PageHeader } from '@/components/app/AppTopbar'
 import { InspectionChip } from '@/components/app/bits'
+import { dismissReplyAction } from '@/app/staff/actions'
 import { BarList, HealthDonut, Metric, initials, shortDay } from '@/components/app/dashboard'
 import { daysUntil, fmtDate, fmtDateTime, kes, relativeDays } from '@/components/app/format'
 import { AppIcon } from '@/components/app/icons'
 import { requireStaff } from '@/lib/auth/session'
-import { adminAttention } from '@/lib/data/attention'
+import { adminMoney, adminTodo, adminUpcoming, recentActivity } from '@/lib/data/overview'
 import { staffWorkQueue, type WorkTask } from '@/lib/data/workqueue'
 import { projectHealthCounts, staffStats, upcomingInspections } from '@/lib/data/dashboard'
 import { threadsAwaitingReply } from '@/lib/data/messages'
-import { listNotifications } from '@/lib/data/misc'
+import { unreadNotifications } from '@/lib/data/misc'
 import { projectStageCounts } from '@/lib/data/projects'
-import { projectStages, stageLabels, type Health, type ProjectStage } from '@/lib/labels'
+import { arrivalLabel, healthChip, healthLabels, projectStages, stageLabels, type Health, type ProjectStage } from '@/lib/labels'
 import { site } from '@/lib/site'
 
 export const metadata = { title: 'My work' }
@@ -121,215 +122,270 @@ function VisitList({ visits, manager, title, empty = 'No visits scheduled.' }: {
   )
 }
 
-type Attention = Awaited<ReturnType<typeof adminAttention>>
-type Stats = NonNullable<Awaited<ReturnType<typeof staffStats>>>
-type Threads = { thread: string; href: string; label: string; body: string; client_name: string; project_stage: string | null; last_at: Date }[]
-type Notice = Awaited<ReturnType<typeof listNotifications>>[number]
+type Todos = Awaited<ReturnType<typeof adminTodo>>
+type Todo = Todos['all'][number]
+type TodoView = 'all' | 'mine' | 'client'
+type Upcoming = Awaited<ReturnType<typeof adminUpcoming>>[number]
+type Money = Awaited<ReturnType<typeof adminMoney>>
+type Activity = Awaited<ReturnType<typeof recentActivity>>[number]
 
-// The admin home: what needs them first, then the pipeline and money, with the week's visits alongside.
-function AttentionQueue({ attention }: { attention: Attention }) {
+function OpenTasks({ tasks, personal=false }: { tasks: WorkTask[]; personal?:boolean }) {
+  const ready = tasks.filter(t=>t.waiting_on!=='Client')
+  const waiting = tasks.filter(t=>t.waiting_on==='Client')
   return (
-    <section className="panel" aria-labelledby="needs-you">
-      <div className="panel-head">
-        <h2 id="needs-you">Needs you</h2>
-        <span className="text-sm text-muted">{attention.total ? `${attention.total} waiting` : 'All clear'}</span>
+    <div className="space-y-4">
+      <section className="panel" aria-labelledby="tasks">
+        <div className="panel-head"><h2 id="tasks">{personal ? 'Your actions & eligible reviews' : 'Team actions'} ({ready.length})</h2><span className="text-sm text-muted">Most urgent first</span></div>
+        {ready.length ? <>
+          <ul className="divide-y divide-line">{ready.slice(0,6).map(t=><TaskRow key={t.key} t={t}/>)}</ul>
+          {ready.length>6&&<details className="panel-pad"><summary className="cursor-pointer text-sm font-semibold">Show {ready.length-6} more actions</summary><ul className="divide-y divide-line">{ready.slice(6).map(t=><TaskRow key={t.key} t={t}/>)}</ul></details>}
+        </> : <p className="empty">No actions waiting in this view.</p>}
+      </section>
+      {waiting.length>0&&<details className="panel">
+        <summary className="panel-head cursor-pointer"><h2>Waiting on clients ({waiting.length})</h2><span className="text-sm text-muted">Follow up if needed</span></summary>
+        <ul className="divide-y divide-line">{waiting.map(t=><TaskRow key={t.key} t={t}/>)}</ul>
+      </details>}
+    </div>
+  )
+}
+
+// ---------- Business overview (admin): what needs doing, what is coming up, how the business is doing, what happened ----------
+
+const daysAgo = (d: Date) => Math.max(0, Math.floor((Date.now() - d.getTime()) / 86400000))
+const kenyaDay = (d: Date) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Nairobi' }).format(d)
+const kenyaTime = (d: Date) => new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Africa/Nairobi' }).format(d)
+function dayLabel(date: string) {
+  const n = daysUntil(date)
+  return n === 0 ? 'Today' : n === 1 ? 'Tomorrow' : n === -1 ? 'Yesterday' : shortDay(date)
+}
+
+// A client reply in the to-do list; other work uses TaskRow.
+function TodoRow({ t }: { t: Todo }) {
+  if (!t.key.startsWith('reply:') || !t.since) return <TaskRow t={t} />
+  const days = daysAgo(t.since)
+  return (
+    <li className="flex items-center">
+      <Link href={t.href} className="row-link min-w-0 flex-1 flex-wrap gap-y-2 py-3.5">
+        <span className={`tile ${t.closed ? 'tile--none' : days > 2 ? 'tile--warn' : ''}`}><AppIcon name="message" /></span>
+        <span className="min-w-0 flex-1 basis-56">
+          <span className="row-link__title">{t.task}</span>
+          <span className="row-link__meta">{t.label}</span>
+          {t.note && <span className="mt-0.5 line-clamp-1 block text-sm text-ink-2">&ldquo;{t.note}&rdquo;</span>}
+        </span>
+        <span className="flex items-center gap-2">
+          {t.closed
+            ? <span className="chip chip--none chip--plain">Closed project</span>
+            : <span className={`chip ${days > 2 ? 'chip--warn' : 'chip--none chip--plain'}`}>Waiting {days === 0 ? 'since today' : `${days} day${days === 1 ? '' : 's'}`}</span>}
+          <AppIcon name="arrowRight" className="text-muted" />
+        </span>
+      </Link>
+      {/* No reply needed (e.g. "Thank you"): clears it until the client writes again. */}
+      <form action={dismissReplyAction} className="pr-4">
+        <input type="hidden" name="thread" value={t.key.slice('reply:'.length)} />
+        <button type="submit" aria-label={`No reply needed: ${t.task}`} title="No reply needed" className="grid h-8 w-8 place-items-center rounded-full border-0 bg-transparent text-lg leading-none text-muted hover:bg-paper hover:text-ink">×</button>
+      </form>
+    </li>
+  )
+}
+
+function TodoList({ todo, view }: { todo: Todos; view: TodoView }) {
+  const list = view === 'mine' ? todo.mine : view === 'client' ? todo.client : todo.all
+  // Counts leave out replies on closed projects, matching the header and the sidebar badge; those rows still show, last.
+  const open = (l: Todo[]) => l.filter((t) => !t.closed).length
+  const tabs: [TodoView, string, number][] = [['all', 'All', open(todo.all)], ['mine', 'Mine', open(todo.mine)], ['client', 'Waiting on client', open(todo.client)]]
+  return (
+    <section className="panel" aria-labelledby="todo">
+      <div className="panel-head flex-wrap gap-3">
+        <h2 id="todo">To do</h2>
+        <nav className="segmented" aria-label="Filter the to-do list">
+          {tabs.map(([v, label, n]) => <Link key={v} href={v === 'all' ? '/staff' : `/staff?todo=${v}`} aria-current={view === v ? 'page' : undefined} scroll={false}>{label} <span className="count">{n}</span></Link>)}
+        </nav>
       </div>
-      {attention.items.length === 0 ? (
-        <p className="panel-pad text-ink-2">Nothing needs you right now. Reports, visits, client replies, payments, balances, enquiries and teams are all clear.</p>
+      {list.length ? (
+        <>
+          <ul className="divide-y divide-line">{list.slice(0, 7).map((t) => <TodoRow key={t.key} t={t} />)}</ul>
+          {list.length > 7 && (
+            <details className="border-t border-line">
+              <summary className="cursor-pointer px-6 py-3 text-sm font-semibold">Show {list.length - 7} more</summary>
+              <ul className="divide-y divide-line">{list.slice(7).map((t) => <TodoRow key={t.key} t={t} />)}</ul>
+            </details>
+          )}
+        </>
       ) : (
-        <ul className="py-1.5">
-          {attention.items.map((i) => (
-            <li key={i.key}>
-              <Link href={i.href} className="row-link">
-                <span className={`tile ${i.urgent ? 'tile--warn' : ''}`}><AppIcon name={i.icon} /></span>
-                <span className="min-w-0 flex-1">
-                  <span className="row-link__title">{i.count} {i.label}</span>
-                  <span className="row-link__meta">
-                    {i.hint}{i.oldestDays !== null ? ` · oldest ${i.oldestDays === 0 ? 'today' : `${i.oldestDays} day${i.oldestDays === 1 ? '' : 's'}`}` : ''}
-                  </span>
-                </span>
-                <AppIcon name="arrowRight" className="text-muted" />
-              </Link>
-            </li>
+        <p className="empty">{view === 'client' ? 'Nothing is waiting on a client.' : 'Nothing needs doing right now.'}</p>
+      )}
+    </section>
+  )
+}
+
+const upcomingIcon = { visit: 'pin', report: 'report', invoice: 'wallet' } as const
+
+function ComingUp({ items }: { items: Upcoming[] }) {
+  const groups = new Map<string, Upcoming[]>()
+  for (const i of items) {
+    const date = day(i.on_date)
+    const n = daysUntil(date)
+    const label = !date ? 'Date to confirm' : n !== null && n < 0 ? 'Overdue' : dayLabel(date)
+    groups.set(label, [...(groups.get(label) ?? []), i])
+  }
+  return (
+    <section className="panel" aria-labelledby="coming-up">
+      <div className="panel-head"><h2 id="coming-up">Coming up</h2><Link href="/staff/inspections" className="text-sm">Schedule</Link></div>
+      {!items.length ? (
+        <p className="panel-pad text-sm text-muted">Nothing booked or due in the next 14 days.</p>
+      ) : (
+        <div className="pb-2">
+          {[...groups].map(([label, rows]) => (
+            <div key={label}>
+              <p className={`px-6 pb-1 pt-3 text-xs font-semibold uppercase tracking-wide ${label === 'Overdue' ? 'text-bad' : 'text-muted'}`}>{label}</p>
+              <ul>
+                {rows.map((i) => (
+                  <li key={i.kind + i.href}>
+                    <Link href={i.href} className="row-link py-2.5">
+                      <span className={`tile ${label === 'Overdue' ? 'tile--bad' : i.status === 'in_progress' ? 'tile--info' : ''}`}><AppIcon name={upcomingIcon[i.kind]} /></span>
+                      <span className="min-w-0 flex-1">
+                        <span className="row-link__title truncate">{i.title}</span>
+                        <span className="row-link__meta">{[i.status === 'in_progress' ? 'In progress' : i.kind === 'visit' ? arrivalLabel(i.arrival) : null, i.meta].filter(Boolean).join(' · ')}</span>
+                      </span>
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            </div>
           ))}
-        </ul>
+        </div>
       )}
     </section>
   )
 }
 
-function OpenTasks({ tasks }: { tasks: WorkTask[] }) {
-  return (
-    <section className="panel" aria-labelledby="tasks">
-      <div className="panel-head">
-        <h2 id="tasks">Open tasks</h2>
-        <span className="text-sm text-muted">{tasks.length > 6 ? `6 of ${tasks.length}` : tasks.length} in the team</span>
-      </div>
-      {tasks.length === 0 ? (
-        <p className="empty">No team tasks waiting.</p>
-      ) : (
-        <ul className="divide-y divide-line">
-          {tasks.slice(0, 6).map((t) => <TaskRow key={t.key} t={t} />)}
-        </ul>
-      )}
-    </section>
-  )
-}
-
-function Pipeline({ stages, health }: { stages: Partial<Record<ProjectStage, number>>; health: Partial<Record<Health, number>> }) {
+function PipelineRow({ stages, health, closedMonth }: { stages: Partial<Record<ProjectStage, number>>; health: Partial<Record<Health, number>>; closedMonth: number }) {
+  const healthOrder: Health[] = ['high_risk', 'at_risk', 'on_track', 'not_assessed']
   return (
     <section className="panel" aria-labelledby="pipeline">
-      <div className="panel-head">
-        <h2 id="pipeline">Pipeline</h2>
-        <Link href="/staff/projects?stage=all" className="text-sm">All projects</Link>
-      </div>
+      <div className="panel-head"><h2 id="pipeline">Pipeline</h2><Link href="/staff/projects?stage=all" className="text-sm">All projects</Link></div>
       <div className="panel-pad space-y-4">
-        <ol className="grid grid-cols-2 gap-2 sm:grid-cols-4 2xl:grid-cols-7">
-          {projectStages.map((s) => (
-            <li key={s}>
-              <Link href={`/staff/projects?stage=${s}`} className="block rounded-lg border border-line p-3 no-underline hover:bg-paper">
-                <span className="block text-xs text-muted">{stageLabels[s]}</span>
-                <span className="mt-1 block text-2xl font-semibold text-ink">{stages[s] ?? 0}</span>
-              </Link>
-            </li>
-          ))}
+        <ol className="grid grid-cols-3 gap-px overflow-hidden rounded-lg border border-line bg-line sm:grid-cols-6">
+          {projectStages.filter((s) => s !== 'closed').map((s) => {
+            const n = stages[s] ?? 0
+            return (
+              <li key={s} className="bg-white">
+                <Link href={`/staff/projects?stage=${s}`} className="flex h-full flex-col justify-between p-3 no-underline hover:bg-paper">
+                  <span className="block text-xs text-muted">{stageLabels[s]}</span>
+                  <span className={`mt-1 block text-2xl font-semibold ${n ? 'text-ink' : 'text-line-strong'}`}>{n}</span>
+                </Link>
+              </li>
+            )
+          })}
         </ol>
-        <p className="text-sm text-ink-2">
-          Health: {health.on_track ?? 0} on track · {health.at_risk ?? 0} at risk · {health.high_risk ?? 0} high risk · {health.not_assessed ?? 0} not yet assessed
+        <p className="flex flex-wrap items-center gap-2 text-sm text-ink-2">
+          {healthOrder.filter((h) => health[h]).map((h) => <span key={h} className={`chip chip--${healthChip[h]}`}>{health[h]} {healthLabels[h].toLowerCase()}</span>)}
+          <span className="text-muted">{closedMonth} closed this month</span>
         </p>
       </div>
     </section>
   )
 }
 
-function Money({ stats, attention }: { stats: Stats; attention: Attention }) {
+function MoneyPanel({ money }: { money: Money }) {
+  const invoices = (n: number) => `${n} invoice${n === 1 ? '' : 's'}`
+  const figures = [
+    { label: 'Deposits due', value: kes(money.deposits_kes), foot: invoices(money.deposits_n), href: '/staff/projects?need=unpaid', warn: false },
+    { label: 'Balances to collect', value: kes(money.balance_kes), foot: money.overdue_kes ? `${invoices(money.balance_n)} · ${kes(money.overdue_kes)} overdue` : invoices(money.balance_n), href: '/staff/projects?stage=all&need=balance', warn: money.overdue_kes > 0 },
+    { label: 'Received this month', value: kes(money.paid_month_kes), foot: 'Payments less refunds', href: '/staff/revenue', warn: false },
+  ]
   return (
     <section className="panel" aria-labelledby="money">
-      <div className="panel-head">
-        <h2 id="money">Money</h2>
-        <Link href="/staff/projects?need=balance" className="text-sm">Balances</Link>
-      </div>
+      <div className="panel-head"><h2 id="money">Money</h2><Link href="/staff/revenue" className="text-sm">Revenue</Link></div>
       <dl className="panel-pad grid gap-4 sm:grid-cols-3">
-        <div>
-          <dt className="text-sm text-muted"><Link href="/staff/projects?need=unpaid" className="no-underline hover:underline">Waiting for a deposit</Link></dt>
-          <dd className="mt-1 text-2xl font-semibold text-ink">{stats.awaiting_payment}</dd>
-        </div>
-        <div>
-          <dt className="text-sm text-muted"><Link href="/staff/projects?need=balance" className="no-underline hover:underline">Balance still to collect</Link></dt>
-          <dd className="mt-1 text-2xl font-semibold text-ink">{stats.balance_outstanding}</dd>
-        </div>
-        <div>
-          <dt className="text-sm text-muted">Received this month</dt>
-          <dd className="mt-1 text-2xl font-semibold text-ink">{kes(attention.paidMonthKes)}</dd>
-        </div>
+        {figures.map((f) => (
+          <div key={f.label}>
+            <dt className="text-sm text-muted"><Link href={f.href} className="text-muted no-underline hover:underline">{f.label}</Link></dt>
+            <dd className="mt-1 text-2xl font-semibold text-ink">{f.value}</dd>
+            <dd className={`mt-0.5 text-xs ${f.warn ? 'font-semibold text-bad' : 'text-muted'}`}>{f.foot}</dd>
+          </div>
+        ))}
       </dl>
     </section>
   )
 }
 
-function AdminThreads({ threads }: { threads: Threads }) {
-  return (
-    <section className="panel" aria-labelledby="threads">
-      <div className="panel-head">
-        <h2 id="threads">Clients waiting for a reply</h2>
-        <Link href="/staff/messages" className="text-sm">All conversations</Link>
-      </div>
-      {threads.length === 0 ? (
-        <p className="empty">No client is waiting on the team.</p>
-      ) : (
-        <ul className="py-1.5">
-          {threads.slice(0, 5).map((t) => (
-            <li key={t.thread}>
-              <Link href={t.href} className="row-link items-start">
-                <span className="app-avatar" aria-hidden="true">{initials(t.client_name)}</span>
-                <span className="min-w-0 flex-1">
-                  <span className="row-link__title">
-                    {t.client_name} · {t.label}
-                    {t.project_stage === 'closed' && <span className="chip chip--none chip--plain ml-2">Closed project</span>}
-                  </span>
-                  <span className="mt-0.5 line-clamp-2 block text-sm text-ink-2">{t.body}</span>
-                  <span className="row-link__meta">{fmtDateTime(t.last_at)}</span>
-                </span>
-              </Link>
-            </li>
-          ))}
-        </ul>
-      )}
-    </section>
-  )
-}
-
-function RecentActivity({ notifications }: { notifications: Notice[] }) {
+function ActivityFeed({ events }: { events: Activity[] }) {
+  const groups = new Map<string, Activity[]>()
+  for (const e of events) {
+    const label = dayLabel(kenyaDay(new Date(e.created_at)))
+    groups.set(label, [...(groups.get(label) ?? []), e])
+  }
   return (
     <section className="panel" aria-labelledby="activity">
-      <div className="panel-head"><h2 id="activity">Recent activity</h2><Link href="/staff/notifications" className="text-sm">All notifications</Link></div>
-      {notifications.length === 0 ? (
-        <p className="empty">Nothing yet.</p>
-      ) : (
-        <ul className="divide-y divide-line">
-          {notifications.map((n) => (
-            <li key={n.id} className="px-6 py-3 text-sm">
-              {n.href ? <Link href={n.href}>{n.title}</Link> : n.title}
-              <span className="block text-xs text-muted">{fmtDateTime(n.created_at)}</span>
-            </li>
+      <div className="panel-head"><h2 id="activity">Recent activity</h2><Link href="/staff/activity" className="text-sm">All activity</Link></div>
+      {!events.length ? <p className="empty">Nothing yet.</p> : (
+        <div className="pb-2">
+          {[...groups].map(([label, rows]) => (
+            <div key={label}>
+              <p className="px-6 pb-1 pt-3 text-xs font-semibold uppercase tracking-wide text-muted">{label}</p>
+              <ul>
+                {rows.map((e) => (
+                  <li key={e.id} className="px-6 py-2 text-sm">
+                    {e.href ? <Link href={e.href} className="text-ink no-underline hover:underline">{e.summary}</Link> : <span className="text-ink">{e.summary}</span>}
+                    <span className="block text-xs text-muted">{[e.ref, e.actor_name ?? 'System', kenyaTime(new Date(e.created_at))].filter(Boolean).join(' · ')}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
           ))}
-        </ul>
+        </div>
       )}
     </section>
   )
 }
 
-function AdminOverview({ denied, attention, stats, stages, health, tasks, visits, threads, notifications }: {
-  denied?: string
-  attention: Attention
-  stats: Stats
-  stages: Partial<Record<ProjectStage, number>>
-  health: Partial<Record<Health, number>>
-  tasks: WorkTask[]
-  visits: Visit[]
-  threads: Threads
-  notifications: Notice[]
+function AdminOverview({ denied, todo, view, upcoming, money, stages, health, activity }: {
+  denied?: string; todo: Todos; view: TodoView; upcoming: Upcoming[]; money: Money
+  stages: Partial<Record<ProjectStage, number>>; health: Partial<Record<Health, number>>; activity: Activity[]
 }) {
-  const week = visits.filter((v) => {
-    const n = daysUntil(day(v.scheduled_for))
-    return n === null || n <= 7
-  })
+  const week = upcoming.filter((u) => { const n = daysUntil(day(u.on_date)); return u.kind === 'visit' && n !== null && n >= 0 && n <= 7 }).length
+  const owed = money.deposits_kes + money.balance_kes
+  const summary = [
+    todo.count ? `${todo.count} ${todo.count === 1 ? 'thing needs' : 'things need'} doing` : 'Nothing needs doing',
+    `${week} visit${week === 1 ? '' : 's'} this week`,
+    owed ? `${kes(owed)} to collect` : null,
+  ].filter(Boolean).join(' · ')
+  const first = todo.all.find((t) => !t.closed)
   return (
     <div className="space-y-5">
-      <PageHeader
-        title="Business overview"
-        intro={attention.total ? `${attention.total} ${attention.total === 1 ? 'thing needs' : 'things need'} you. Work from the top of the list.` : 'Nothing needs you right now.'}
-      >
-        <div className="flex flex-wrap gap-2">
-          <Link className="btn btn-secondary btn-small" href="/staff/inspections">Schedule</Link>
-          <Link className="btn btn-primary btn-small" href="/staff/projects">All projects</Link>
-        </div>
+      <PageHeader title="Business overview" intro={summary}>
+        {first ? <Link className="btn btn-primary btn-small" href={first.href}>Start next task</Link> : <Link className="btn btn-secondary btn-small" href="/staff/projects">All projects</Link>}
       </PageHeader>
       {denied && <p className="alert alert-warn">That page needs a different role.</p>}
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_23rem] xl:items-start">
-        <div className="space-y-4">
-          <AttentionQueue attention={attention} />
-          <OpenTasks tasks={tasks} />
-          <Pipeline stages={stages} health={health} />
-          <Money stats={stats} attention={attention} />
+      {/* Two columns on wide screens. On smaller screens the wrappers dissolve, so the order reads to do, coming up, pipeline, money, activity. */}
+      <div className="flex flex-col gap-4 xl:grid xl:grid-cols-[minmax(0,1fr)_23rem] xl:items-start">
+        <div className="contents xl:block xl:space-y-4">
+          <div className="order-1"><TodoList todo={todo} view={view} /></div>
+          <div className="order-3"><PipelineRow stages={stages} health={health} closedMonth={money.closed_month} /></div>
+          <div className="order-4"><MoneyPanel money={money} /></div>
         </div>
-        <div className="space-y-4">
-          <VisitList visits={week} manager title="Next 7 days" empty="No visits in the next 7 days." />
-          <AdminThreads threads={threads} />
-          <RecentActivity notifications={notifications} />
+        <div className="contents xl:block xl:space-y-4">
+          <div className="order-2"><ComingUp items={upcoming} /></div>
+          <div className="order-5"><ActivityFeed events={activity} /></div>
         </div>
       </div>
     </div>
   )
 }
 
-export default async function StaffWorkHome({ searchParams: promise }: { searchParams: Promise<{ denied?: string; view?: string }> }) {
+export default async function StaffWorkHome({ searchParams: promise }: { searchParams: Promise<{ denied?: string; view?: string; todo?: string }> }) {
   const query = await promise
   const user = await requireStaff()
   const manager = user.role !== 'field_agent'
   const admin = user.role === 'admin'
+  if (admin) {
+    const [todo, upcoming, money, stages, health, activity] = await Promise.all([adminTodo(user.id), adminUpcoming(), adminMoney(), projectStageCounts(), projectHealthCounts(), recentActivity(5)])
+    const view: TodoView = query.todo === 'mine' || query.todo === 'client' ? query.todo : 'all'
+    return <AdminOverview denied={query.denied} todo={todo} view={view} upcoming={upcoming} money={money} stages={stages} health={health} activity={activity} />
+  }
   const team = query.view === 'team' || (admin && query.view !== 'mine')
-  const [myTasks, teamTasks, stats, health, stages, visits, threads, notifications] = await Promise.all([
+  const [myTasks, teamTasks, stats, health, stages, visits, threads, notes] = await Promise.all([
     manager ? staffWorkQueue(user.id, false) : [],
     manager ? staffWorkQueue(user.id, true) : [],
     manager ? staffStats() : null,
@@ -337,11 +393,9 @@ export default async function StaffWorkHome({ searchParams: promise }: { searchP
     manager ? projectStageCounts() : null,
     upcomingInspections(manager ? undefined : user.id),
     manager ? threadsAwaitingReply() : [],
-    listNotifications(user.id, 5),
+    unreadNotifications(user.id, 5),
   ])
   const tasks = team ? teamTasks : myTasks
-  const attention = admin ? await adminAttention(threads) : null
-  const notes = notifications.filter((n) => !n.read_at)
   const firstName = user.full_name.split(' ')[0]
 
   const updates = notes.length > 0 && (
@@ -392,9 +446,6 @@ export default async function StaffWorkHome({ searchParams: promise }: { searchP
     )
   }
 
-  if (admin && attention && stats && stages && health) {
-    return <AdminOverview denied={query.denied} attention={attention} stats={stats} stages={stages} health={health} tasks={teamTasks} visits={visits} threads={threads} notifications={notifications} />
-  }
 
   const exceptions = stats
     ? [
@@ -461,26 +512,8 @@ export default async function StaffWorkHome({ searchParams: promise }: { searchP
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_23rem] xl:items-start">
         <div className="space-y-4">
-          <section className="panel" aria-labelledby="work-queue">
-            <div className="panel-head">
-              <h2 id="work-queue">{team ? 'Team tasks' : 'Your tasks & eligible reviews'}</h2>
-              <span className="text-sm text-muted">{tasks.length}{tasks.length === 100 ? '+' : ''} task{tasks.length === 1 ? '' : 's'}</span>
-            </div>
-            {tasks.length === 0 ? (
-              <div className="panel-pad space-y-3">
-                <p className="text-ink-2">
-                  {!team
-                    ? `You have no tasks assigned directly to you right now. There ${teamTasks.length === 1 ? 'is' : 'are'} ${teamTasks.length} task${teamTasks.length === 1 ? '' : 's'} across the team.`
-                    : 'No team tasks waiting in this view.'}
-                </p>
-                {!team && teamTasks.length > 0 && <Link className="btn btn-secondary btn-small" href="/staff?view=team">Check team tasks ({teamTasks.length})</Link>}
-              </div>
-            ) : (
-              <ul className="divide-y divide-line">
-                {tasks.map((t) => <TaskRow key={t.key} t={t} />)}
-              </ul>
-            )}
-          </section>
+          <OpenTasks tasks={tasks} personal={!team} />
+          {!team && teamTasks.length>0&&<Link className="btn btn-secondary btn-small" href="/staff?view=team">View all team work ({teamTasks.length})</Link>}
           <div className="grid gap-4 lg:grid-cols-2 lg:items-start">
             {stages && (
               <section className="panel" aria-labelledby="pipeline">

@@ -9,8 +9,8 @@ export const metadata = { title: 'Team' }
 
 const roleHelp = [
   ['Field agent', 'Sees only the inspections and projects assigned to them: site details, contacts, checklist. Records findings and uploads evidence. No client finances or messages.'],
-  ['Analyst', 'Runs the pipeline: qualifies requests, writes proposals, plans and reviews inspections, writes and reviews reports, messages clients. Can view pricing.'],
-  ['Admin', 'Everything an analyst can do, plus team management, pricing changes and the full audit log.'],
+  ['Analyst', 'Delivers projects: qualifies requests, writes proposals, assigns the team, plans visits, reviews other people’s visits, writes reports for an admin to approve, and messages clients. Sees billing but does not change it.'],
+  ['Admin', 'Everything an analyst can do, plus publishing reports, invoices, payments, refunds and monitoring fees, reopening projects, pricing, the team, integrations, revenue and the audit log.'],
 ]
 
 export default async function TeamPage({ searchParams }: { searchParams: Promise<{ error?: string }> }) {

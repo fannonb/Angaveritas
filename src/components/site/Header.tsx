@@ -46,7 +46,7 @@ export function Header() {
         <div className="wrap topbar__inner">
           <p>Independent ground verification and due diligence across Kenya</p>
           <ul className="topbar__links">
-            <li className="topbar__muted">Mon–Fri, East Africa Time</li>
+            <li className="topbar__muted">Mon–Fri, 8am–5pm East Africa Time</li>
             {site.phone && <li><a href={telHref(site.phone)}><Icon name="phone" />{formatPhone(site.phone)}</a></li>}
             <li><a href={`mailto:${site.email}`}><Icon name="mail" />{site.email}</a></li>
           </ul>
@@ -75,7 +75,7 @@ export function Header() {
             <Link href="/contact" aria-current={current('/contact')}>Contact</Link>
           </nav>
           <div className="mobile-menu__actions">
-            <Link className="btn btn-primary" href="/estimate">Get an estimate</Link>
+            <Link className="btn btn-primary header-cta" href="/estimate">Get an estimate</Link>
             <AccountLink className="btn btn-secondary" />
           </div>
           <div className="mobile-menu__contact">

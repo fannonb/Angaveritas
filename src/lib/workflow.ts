@@ -1,7 +1,9 @@
 import { briefProfile, type BriefContext } from './service-briefs'
-import type { ProjectStage, RequestStatus, Role } from './labels'
+import { arrivalLabel, type ProjectStage, type RequestStatus, type Role } from './labels'
 
-export function fieldworkProblem(p: { onboarding_submitted_at: unknown; data_consent_at: unknown; payment_status: string; lead_analyst_id: string | null; nda_status?: string }, agentId: string | null) {
+export function fieldworkProblem(p: { onboarding_submitted_at: unknown; data_consent_at: unknown; payment_status: string; lead_analyst_id: string | null; nda_status?: string;work_hold_reason?:string|null;brief_approved?:boolean|null }, agentId: string | null) {
+  if(p.work_hold_reason)return `Work is on hold: ${p.work_hold_reason}`
+  if(p.brief_approved===false || p.brief_approved===null)return 'The analyst must approve the current brief against the agreed scope.'
   if (!p.onboarding_submitted_at || !p.data_consent_at) return 'The client must complete onboarding and consent before fieldwork.'
   if (!['deposit_received', 'paid', 'waived'].includes(p.payment_status)) return 'Record the required payment or an authorised waiver before fieldwork.'
   if (p.nda_status && !['none', 'signed'].includes(p.nda_status)) return 'The requested confidentiality agreement must be signed before fieldwork.'
@@ -25,13 +27,15 @@ export type NextStep = { title: string; text: string; tab: 'overview' | 'inspect
  * `unpaidBalanceKes` is money still owed on issued invoices after the deposit (0 when settled).
  */
 export function staffNextStep(
-  p: { stage: ProjectStage; onboarding_submitted_at: unknown; data_consent_at: unknown; payment_status: string; lead_analyst_id: string | null; field_agent_id: string | null; nda_status?: string },
-  inspections: { status: string }[],
+  p: { stage: ProjectStage; onboarding_submitted_at: unknown; data_consent_at: unknown; payment_status: string; lead_analyst_id: string | null; field_agent_id: string | null; nda_status?: string;work_hold_reason?:string|null;brief_approved?:boolean|null },
+  inspections: { status: string; scheduled_for?: string | null }[],
   reports: { status: string }[],
   flaggedEvidence: number,
   unpaidBalanceKes = 0,
 ): NextStep | null {
   if (p.stage === 'closed') return null
+  if(p.work_hold_reason)return {title:'Work on hold',text:p.work_hold_reason,tab:'overview'}
+  if(p.onboarding_submitted_at && p.data_consent_at && (p.brief_approved===false||p.brief_approved===null))return {title:'Review the service brief',text:'Check the current brief against the agreed scope before scheduling.',tab:'overview'}
   const live = inspections.filter((i) => i.status !== 'cancelled')
   if (live.length === 0 || (['planning','onboarding'].includes(p.stage) && reports.some(r => r.status==='published') && live.every(i => i.status==='reviewed'))) {
     if (!p.onboarding_submitted_at || !p.data_consent_at) return { title: 'Waiting for client onboarding', text: 'The client must complete onboarding and consent before fieldwork. Send a reminder if it is taking long.', tab: 'messages' }
@@ -45,10 +49,13 @@ export function staffNextStep(
     if (problem) return { title:'Visit preparation is incomplete',text:problem,tab:!p.onboarding_submitted_at || !p.data_consent_at ? 'messages' : !['deposit_received','paid','waived'].includes(p.payment_status) ? 'operations' : p.nda_status && !['none','signed'].includes(p.nda_status) ? 'agreement' : 'overview' }
   }
   if (live.some((i) => i.status === 'submitted')) return { title: 'Review the submitted inspection', text: 'Findings and evidence are in. An independent reviewer needs to check them before they reach the client.', tab: 'inspections' }
-  if (live.some((i) => i.status === 'scheduled' || i.status === 'in_progress')) return { title: 'Fieldwork under way', text: 'The field agent records findings and evidence on the inspection, then submits it for review.', tab: 'inspections' }
+  if (live.some((i) => i.status === 'in_progress')) return { title: 'Fieldwork under way', text: 'The field agent records findings and evidence on the inspection, then submits it for review.', tab: 'inspections' }
+  const booked = live.find((i) => i.status === 'scheduled')
+  if (booked && booked.scheduled_for === null) return { title: 'Set the visit date', text: 'The visit has no date yet. Set the date and arrival time so the client and the field agent know when it happens.', tab: 'inspections' }
+  if (booked) return { title: 'Visit booked', text: 'On the day, the field agent starts the visit, records each check with photos and submits it for review.', tab: 'inspections' }
   if (flaggedEvidence > 0 && !reports.some(r => r.status === 'published')) return { title: 'Check flagged evidence', text: `${flaggedEvidence} evidence item${flaggedEvidence === 1 ? '' : 's'} held for review. Release usable evidence with a review note before including it in the report.`, tab: 'evidence' }
-  if (reports.some((r) => r.status === 'in_review')) return { title: 'Report waiting for review', text: 'Another analyst or admin must approve it before it can be published.', tab: 'reports' }
-  if (reports.some((r) => r.status === 'draft')) return { title: 'Finish the draft report', text: 'Complete the draft and send it for review.', tab: 'reports' }
+  if (reports.some((r) => r.status === 'in_review')) return { title: 'Report waiting for review', text: 'An admin must approve it before it can be published.', tab: 'reports' }
+  if (reports.some((r) => r.status === 'draft')) return { title: 'Finish the draft report', text: 'Complete the draft. An admin publishes it straight to the client; anyone else sends it to an admin for approval.', tab: 'reports' }
   if (reports.some((r) => r.status === 'published')) {
     if (unpaidBalanceKes > 0) return { title: 'Collect the outstanding balance', text: `KES ${unpaidBalanceKes.toLocaleString('en-US')} is still payable on this project. Record the payment or an authorised waiver before closing it.`, tab: 'operations' }
     if (p.stage === 'monitoring') return { title: 'Monitoring in progress', text: 'Check the plan and the next cycle under Billing.', tab: 'operations' }
@@ -57,42 +64,83 @@ export function staffNextStep(
   return { title: 'Write the report', text: 'Inspections are reviewed. Start the report from the reviewed findings.', tab: 'reports' }
 }
 
-export type ClientNextStep = { title: string; text: string; action?: { label: string; href: string } }
+export type ProgressStep = { key: string; label: string; state: 'done' | 'current' | 'upcoming'; owner: 'client' | 'team'; detail?: string }
+
+/**
+ * Every step of a project from brief to report, in order, for the progress tracker on the client and staff
+ * project pages. The first step not yet done is the current one; `owner` says who has to move it.
+ */
+export function projectProgress(
+  p: BriefContext & { onboarding_submitted_at: unknown; data_consent_at: unknown; payment_status: string; nda_status?: string; lead_analyst_id: string | null; field_agent_id: string | null;required_sites?:number },
+  inspections: { status: string; scheduled_for?: string | null }[],
+  reports: { status: string }[],
+  owedKes: number,
+  fmtDate: (d: string) => string,
+): ProgressStep[] {
+  const profile = briefProfile(p)
+  const visit = profile.code === 'ground_verification' ? 'Site visit' : profile.activity
+  const live = inspections.filter((i) => i.status !== 'cancelled')
+  const booked = live.find((i) => i.scheduled_for)
+  const paid = ['deposit_received', 'paid', 'waived'].includes(p.payment_status)
+  const published = reports.some((r) => r.status === 'published')
+  const steps: (Omit<ProgressStep, 'state'> & { done: boolean })[] = []
+  const add = (key: string, label: string, done: boolean, owner: ProgressStep['owner'], detail?: string) => steps.push({ key, label, done, owner, detail })
+  add('brief', `${profile.tab} sent`, !!p.onboarding_submitted_at && !!p.data_consent_at, 'client')
+  add('deposit', 'Deposit paid', paid, 'client', p.payment_status === 'waived' ? 'Waived' : undefined)
+  if (p.nda_status && p.nda_status !== 'none') add('nda', 'Confidentiality agreement signed', p.nda_status === 'signed', p.nda_status === 'prepared' ? 'client' : 'team')
+  add('team', 'Team assigned', !!p.lead_analyst_id && !!p.field_agent_id, 'team')
+  add('booked', `${visit} booked`, !!booked, 'team', booked?.scheduled_for ? fmtDate(booked.scheduled_for) : undefined)
+  add('visited', `${visit} carried out`, live.filter((i) => ['submitted', 'reviewed'].includes(i.status)).length >= (p.required_sites??1) && live.every(i=>['submitted','reviewed'].includes(i.status)), 'team', live.some((i) => i.status === 'in_progress') ? 'Under way' : undefined)
+  add('checked', 'Evidence checked', live.filter((i) => i.status === 'reviewed').length >= (p.required_sites??1) && live.every(i=>i.status==='reviewed'), 'team')
+  add('report', 'Report written and approved', published, 'team', reports.some((r) => r.status === 'in_review') ? 'In review' : reports.some((r) => r.status === 'draft') ? 'Being written' : undefined)
+  add('balance', 'Balance paid', owedKes <= 0, 'client', owedKes > 0 ? `KES ${owedKes.toLocaleString('en-US')} to pay` : undefined)
+  add('delivered', 'Report open to read', published && owedKes <= 0, 'team')
+  const at = steps.findIndex((s) => !s.done)
+  return steps.map(({ done, ...s }, i) => ({ ...s, state: done ? 'done' : i === at ? 'current' : 'upcoming' }))
+}
+
+export type ClientNextStep ={ title: string; text: string; action?: { label: string; href: string } }
 
 /** What the client needs to know or do next on a project, in plain words. `due` is an unpaid deposit, already formatted; `balance` is the money owed after it, once the report is out. */
 export function clientNextStep(
-  p: BriefContext & { code: string; stage: ProjectStage; onboarding_submitted_at: unknown; nda_status?: string; data_consent_at?: unknown },
-  inspections: { status: string; scheduled_for: string | null }[],
+  p: BriefContext & { code: string; stage: ProjectStage; onboarding_submitted_at: unknown; nda_status?: string; data_consent_at?: unknown;work_hold_reason?:string|null },
+  inspections: { status: string; scheduled_for: string | null; arrival_window?: string | null }[],
   reports: { id: string; client_viewed_at?: unknown }[],
   due: { amount: string; invoice: string; paymentNotified?: boolean } | null,
   fmtDate: (d: string) => string,
   balance: { amount: string; invoice: string } | null = null,
   reportLocked: { amount: string; invoice: string } | null = null,
+  pendingInvoice: string | null = null,
 ): ClientNextStep {
   const base = `/portal/projects/${p.code}`
   const profile = briefProfile(p)
   const isGround = profile.code === 'ground_verification'
-  if (p.stage === 'closed' && reportLocked) return { title: 'Pay the remaining balance', text: `${reportLocked.amount} is still due for ${reportLocked.invoice}. Your report opens once it is settled.`, action: { label: 'How to pay', href: `${base}?tab=operations` } }
+  if(p.work_hold_reason)return {title:'Work is on hold',text:p.work_hold_reason,action:{label:'View request and next steps',href:`${base}?tab=settings`}}
+  if (pendingInvoice && (p.stage==='closed' || (p.onboarding_submitted_at && (!('data_consent_at' in p) || p.data_consent_at)))) return {title:'Checking your payment status',text:`Payment on ${pendingInvoice} is being checked. Please wait for confirmation before paying again. You can check its status in Payments.`,action:{label:'Check payment status',href:`${base}?tab=operations`}}
+  if (p.stage === 'closed' && reportLocked) return { title: 'Pay the remaining balance', text: `${reportLocked.amount} is still due for ${reportLocked.invoice}. Your report opens once it is settled.`, action: { label: 'View invoice & pay', href: `${base}?tab=operations` } }
   if (p.stage === 'closed') return { title: 'This project is complete', text: 'Your reports and evidence stay here. If you need another visit, ask for a follow-up.', action: { label: 'Request a follow-up', href: `/estimate?project=${p.code}` } }
   if (!p.onboarding_submitted_at) return { title: `Complete your ${profile.tab.toLowerCase()}`, text: profile.intro, action: { label: `Add ${profile.tab.toLowerCase()}`, href: `${base}?tab=onboarding` } }
-  if ('data_consent_at' in p && !p.data_consent_at) return { title:'Fieldwork is paused',text:'Your consent is withdrawn. Contact your analyst to discuss what happens next, or review your service brief to give consent again.',action:{label:'Contact your analyst',href:`${base}?tab=messages`} }
+  if ('data_consent_at' in p && !p.data_consent_at) return { title:'Fieldwork is paused',text:'Your consent is withdrawn. Contact your analyst to discuss what happens next, or renew consent under Project settings & privacy.',action:{label:'Contact your analyst',href:`${base}?tab=messages`} }
   if (due?.paymentNotified) return {title:'Confirming your payment',text:`We have your payment reference for invoice ${due.invoice}. The payment team will check the funds and update your balance. No further payment is needed while this is being checked.`}
-  if (due) return { title: 'Pay the deposit', text: `We confirm the work plan once we receive ${due.amount} for invoice ${due.invoice}.`, action: { label: 'How to pay', href: `${base}?tab=operations` } }
-  if (balance && (p.stage === 'delivered' || p.stage === 'monitoring')) return { title: 'Pay the remaining balance', text: `${balance.amount} is still due for ${balance.invoice}. Your report opens once it is settled.`, action: { label: 'How to pay', href: `${base}?tab=operations` } }
+  if (due) return { title: 'Pay the deposit', text: `${due.amount} is due on invoice ${due.invoice} before work starts. Your deposit is 60% of the approved fee; the remaining balance is due before your final report opens.`, action: { label: 'View invoice & pay', href: `${base}?tab=operations` } }
+  if (balance && (p.stage === 'delivered' || p.stage === 'monitoring')) return { title: 'Pay the remaining balance', text: `${balance.amount} is still due for ${balance.invoice}. Your report opens once it is settled.`, action: { label: 'View invoice & pay', href: `${base}?tab=operations` } }
   if (p.nda_status === 'prepared') return { title: 'Sign your confidentiality agreement', text: 'Your agreement is ready. We will start fieldwork once it is signed.', action: { label: 'Review agreement', href: `${base}?tab=agreement` } }
   if (p.nda_status === 'requested') return { title: 'Preparing your confidentiality agreement', text: 'Your analyst is preparing the NDA you requested. We will ask you to sign it before fieldwork starts.' }
   const open = inspections.filter((i) => ['scheduled', 'in_progress', 'submitted'].includes(i.status))
   if (open.some((i) => i.status === 'in_progress')) return { title: isGround ? 'We are at the site' : `${profile.activity} under way`, text: 'Our field agent is collecting evidence for the agreed checks. You will see it here once it has been reviewed.' }
   const visit = open.find((i) => i.status === 'scheduled')
-  if (visit) return { title: visit.scheduled_for ? `${profile.activity} on ${fmtDate(visit.scheduled_for)}` : 'We are arranging the visit date', text: 'Our field agent will collect photos, video and GPS evidence. You will see it here once it has been checked.' }
-  if (open.length) return { title: 'Checking the evidence', text: 'A second person checks every finding and photo before it reaches you.' }
+  const arrival = arrivalLabel(visit?.arrival_window)
+  if (visit) return visit.scheduled_for
+    ? { title: `${profile.activity} on ${fmtDate(visit.scheduled_for)}`, text: `Our field agent arrives ${arrival ?? 'during the day'}. Let the people on site know to expect us. Need a different date? Message your analyst.` }
+    : { title: 'We are arranging the visit date', text: 'We will email you the date and arrival time as soon as it is booked.' }
+  if (open.length) return { title: 'Checking the evidence', text: 'A reviewer checks the findings and supporting evidence before release.' }
   const report = reports[0]
-  if (report && reportLocked) return { title: 'Your report opens once it is paid', text: `Pay ${reportLocked.amount} for ${reportLocked.invoice} to read the findings and our recommendation.`, action: { label: 'How to pay', href: `${base}?tab=operations` } }
+  if (report && reportLocked) return { title: 'Your report opens once it is paid', text: `Pay ${reportLocked.amount} for ${reportLocked.invoice} to read the findings and our recommendation.`, action: { label: 'View invoice & pay', href: `${base}?tab=operations` } }
   if (report && !report.client_viewed_at) return { title: 'Your report is ready', text: 'Read the findings and our recommendation. Feedback is optional.', action: { label: 'Read the report', href: `${base}/reports/${report.id}` } }
   if (report) return p.stage === 'monitoring'
     ? { title: 'Ongoing monitoring', text: 'We visit the site on a schedule and update you here after each visit.' }
     : { title: 'Report delivered', text: 'Questions about the findings? Message your analyst, or ask for a follow-up visit.', action: { label: 'Message your analyst', href: `${base}?tab=messages` } }
-  if (inspections.some((i) => i.status === 'reviewed')) return { title: 'Writing your report', text: 'Your analyst is writing the report. A second person checks it before it is released.' }
+  if (inspections.some((i) => i.status === 'reviewed')) return { title: 'Writing your report', text: 'Your analyst is writing the report. An admin approves it before release.' }
   return { title: isGround ? 'Planning your visit' : `Planning your ${profile.activity.toLowerCase()}`, text: 'Your analyst is reviewing the brief and preparing the agreed work. The schedule will appear here.' }
 }
 

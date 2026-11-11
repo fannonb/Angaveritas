@@ -111,7 +111,7 @@ export async function mayReadFile(user: Pick<SessionUser, 'id' | 'role'>, file: 
   }
   // A client cannot open evidence or report PDFs until the balance is paid, whether or not a report is published yet.
   if (user.role === 'client' && (file.category === 'evidence' || file.category === 'report')) {
-    const [open] = await sql<{ unlocked: boolean }[]>`select client_reports_unlocked(${file.project_id}) as unlocked`
+    const [open] = await sql<{ unlocked: boolean }[]>`select file_deliverable_unlocked(${file.id}) as unlocked`
     if (!open?.unlocked) return false
   }
   const assigned = user.role === 'field_agent' && file.inspection_id
@@ -137,7 +137,7 @@ export async function uploadWriteProblem(user: Pick<SessionUser, 'id' | 'role'>,
     if (!inspection || inspection.project_id !== file.project_id) return 'Inspection not found.'
     // Same rule as starting the upload: the visit's agent, or the project's agent when the visit has none.
     if (user.role === 'field_agent' && inspection.agent_id !== user.id && !(inspection.agent_id === null && access.project.field_agent_id === user.id)) return 'Inspection assignment has changed.'
-    return fieldCollectionProblem(access.project, inspection)
+    return fieldCollectionProblem({...access.project,work_hold_reason:inspection.work_hold_reason,brief_approved:inspection.brief_approved,payment_status:inspection.payment_status}, inspection)
   }
   return access.canManage ? null : 'Not allowed.'
 }
@@ -214,6 +214,7 @@ export async function listProjectFiles(projectId: string, opts: { clientView: bo
       and ${opts.clientView ? sql`f.category <> 'internal' and (f.visible_to_client or f.uploaded_by = (select client_id from projects where id = ${projectId}))
         and (f.category <> 'evidence' or i.status='reviewed' or exists (
           select 1 from report_evidence e join reports r on r.id=e.report_id where e.file_id=f.id and r.status='published'))
+        and (f.category not in ('evidence','report') or file_deliverable_unlocked(f.id))
         and (f.category <> 'report' or exists(select 1 from reports r where r.pdf_file_id=f.id and r.status='published' and r.snapshot is not null))` : sql`true`}
       and ${opts.category ? sql`f.category = ${opts.category}` : sql`true`}
       and ${opts.inspectionId ? sql`f.inspection_id = ${opts.inspectionId}` : sql`true`}

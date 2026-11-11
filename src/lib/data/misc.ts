@@ -1,31 +1,43 @@
 import 'server-only'
 import { sql } from '@/lib/db'
+import { notificationCutoff } from '@/lib/notifications'
 
 // ---------- Notifications ----------
 
-export type NotificationRow = { id: number; title: string; body: string | null; href: string | null; read_at: Date | null; created_at: Date }
+export type NotificationRow = { id: string; title: string; body: string | null; href: string | null; read_at: Date | null; created_at: Date }
 
-export async function listNotifications(userId: string, limit = 30) {
-  return sql<NotificationRow[]>`select * from notifications where user_id = ${userId} order by created_at desc limit ${limit}`
+export async function listNotifications(userId: string, now: number) {
+  return sql<NotificationRow[]>`
+    select id, title, body, href, read_at, created_at from notifications
+    where user_id = ${userId} and created_at > ${notificationCutoff(now)}
+    order by created_at desc, id desc`
 }
 
-/** One page of a person's notifications, newest first. */
-export async function notificationsPage(userId: string, page = 1, pageSize = 10) {
-  const [count] = await sql<{ n: number }[]>`select count(*)::int as n from notifications where user_id = ${userId}`
-  const pages = Math.max(1, Math.ceil(count.n / pageSize))
-  const current = Math.min(Math.max(1, page), pages)
-  const items = await sql<NotificationRow[]>`select * from notifications where user_id = ${userId} order by created_at desc limit ${pageSize} offset ${(current - 1) * pageSize}`
-  return { items, total: count.n, page: current, pages }
+/** Unread notifications, newest first: the updates a client has not dismissed yet. */
+export async function unreadNotifications(userId: string, limit = 5) {
+  return sql<NotificationRow[]>`
+    select * from notifications where user_id = ${userId} and read_at is null and created_at > ${notificationCutoff()}
+    order by created_at desc, id desc limit ${limit}`
 }
 
 export async function unreadNotificationCount(userId: string) {
-  const [row] = await sql<{ n: number }[]>`select count(*)::int as n from notifications where user_id = ${userId} and read_at is null`
+  const [row] = await sql<{ n: number }[]>`
+    select count(*)::int as n from notifications where user_id = ${userId} and read_at is null and created_at > ${notificationCutoff()}`
   return row.n
 }
 
-export async function markNotificationsRead(userId: string, id?: number) {
-  if (id) await sql`update notifications set read_at = now() where user_id = ${userId} and id = ${id} and read_at is null`
-  else await sql`update notifications set read_at = now() where user_id = ${userId} and read_at is null`
+export async function markNotificationsRead(userId: string, id?: string) {
+  await sql`update notifications set read_at = now()
+    where user_id = ${userId} and read_at is null and created_at > ${notificationCutoff()}
+    ${id ? sql`and id = ${id}` : sql``}`
+}
+
+export async function readNotificationLink(userId: string, id: string) {
+  const [row] = await sql<{ href: string | null }[]>`
+    update notifications set read_at = coalesce(read_at, now())
+    where user_id = ${userId} and id = ${id} and created_at > ${notificationCutoff()}
+    returning href`
+  return row?.href
 }
 
 // ---------- Website enquiries ----------

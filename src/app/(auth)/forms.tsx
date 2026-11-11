@@ -62,7 +62,7 @@ export function RegisterForm({ next }: { next?: string }) {
         <input className="input" name="email" {...field('email')} type="email" autoComplete="email" required maxLength={160} />
       </label>
       <PhoneNumberField name="phone" label="Phone number" required />
-      <PhoneNumberField name="whatsapp" label="WhatsApp number" />
+      <PhoneNumberField name="whatsapp" label="WhatsApp number" required />
       <LocationFields />
       <label className="label">
         Password
