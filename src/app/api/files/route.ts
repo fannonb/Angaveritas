@@ -1,10 +1,10 @@
 import { z } from 'zod'
 import { getUser } from '@/lib/auth/session'
-import { allowedMime, createPendingFile, macroCapableMime, openUploadsBy, scanningEnabled } from '@/lib/data/files'
+import { allowedMime, clientDocumentScanRequired, createPendingFile, macroCapableMime, scanningEnabled } from '@/lib/data/files'
 import { getInspection } from '@/lib/data/inspections'
 import { startVisitIfScheduled } from '@/lib/fieldwork'
 import { projectFor } from '@/lib/data/projects'
-import { json, sameOrigin } from '@/lib/request'
+import { json, rateLimited, sameOrigin } from '@/lib/request'
 import { makeStorageKey, MAX_UPLOAD_BYTES, uploadTarget } from '@/lib/storage'
 import { fieldCollectionProblem } from '@/lib/workflow'
 
@@ -40,15 +40,18 @@ export async function POST(req: Request) {
   if ((f.category === 'evidence' || f.category === 'internal') && !access.canFieldwork) return json({ error: 'Not allowed.' }, 403)
 
   const mime = f.mime.toLowerCase()
+  if (!Object.hasOwn(allowedMime, mime)) return json({ error: 'This file type is not accepted. Use photos (JPG, PNG, HEIC), videos (MP4, MOV) or documents (PDF, Word, Excel).' }, 415)
   let mediaType = allowedMime[mime]
-  if (!mediaType) return json({ error: 'This file type is not accepted. Use photos (JPG, PNG, HEIC), videos (MP4, MOV) or documents (PDF, Word, Excel).' }, 415)
+  if (f.category === 'client_document' && clientDocumentScanRequired() && !scanningEnabled()) {
+    return json({ error: 'Document scanning is temporarily unavailable. Please try again later.' }, 503)
+  }
   if (macroCapableMime.has(mime) && !scanningEnabled()) return json({ error: 'Older .doc and .xls files are not accepted. Save the file as .docx, .xlsx or PDF and upload it again.' }, 415)
   if (f.category === 'report' && mime !== 'application/pdf') return json({ error: 'Reports must be PDF files.' }, 415)
   if (f.category === 'agreement' && mime !== 'application/pdf') return json({ error: 'Agreements must be PDF files.' }, 415)
   if (f.drone && mediaType === 'photo') mediaType = 'drone'
   if (mediaType !== 'video' && f.size > 50 * 1024 * 1024) return json({ error: 'Photos and documents can be up to 50 MB.' }, 413)
 
-  let inspectionId: string | null = null
+  let inspection: Awaited<ReturnType<typeof getInspection>> = null
   if (f.inspectionId) {
     const insp = await getInspection(f.inspectionId)
     if (!insp || insp.project_id !== f.projectId) return json({ error: 'Inspection not found.' }, 404)
@@ -57,21 +60,17 @@ export async function POST(req: Request) {
     if (f.category === 'evidence') {
       const problem = fieldCollectionProblem(access.project, insp)
       if (problem) return json({ error: problem }, 409)
-      // The first photo starts the visit.
-      await startVisitIfScheduled(insp, access.project, user.id)
     }
-    inspectionId = insp.id
+    inspection = insp
   }
-  if (f.category === 'evidence' && !inspectionId) return json({ error: 'Add evidence to an assigned inspection.' }, 422)
+  if (f.category === 'evidence' && !inspection) return json({ error: 'Add evidence to an assigned inspection.' }, 422)
   if (user.role === 'field_agent' && f.category !== 'evidence') return json({ error: 'Field agents can upload inspection evidence only.' }, 403)
 
-  // Unfinished uploads cost storage, so each person may only have a handful open at once.
-  if ((await openUploadsBy(user.id)) >= 30) return json({ error: 'You have many uploads still in progress. Let them finish, or try again in an hour.' }, 429)
-
+  if (await rateLimited('uploads:global', 600, 60_000)) return json({ error: 'Uploads are busy. Please try again in a minute.' }, 429)
   const storageKey = makeStorageKey(`projects/${f.projectId}/${f.category}`, f.filename)
-  const fileId = await createPendingFile({
+  const reserved = await createPendingFile({
     projectId: f.projectId,
-    inspectionId,
+    inspectionId: inspection?.id ?? null,
     category: f.category,
     mediaType,
     filename: f.filename,
@@ -83,5 +82,8 @@ export async function POST(req: Request) {
     visibleToClient: f.category === 'client_document',
     uploadedBy: user.id,
   })
-  return json({ fileId, upload: await uploadTarget(fileId, storageKey, f.size) }, 201)
+  if (!reserved.id) return json({ error: reserved.error }, 429)
+  const upload = await uploadTarget(reserved.id, storageKey, f.size)
+  if (f.category === 'evidence' && inspection) await startVisitIfScheduled(inspection, access.project, user.id)
+  return json({ fileId: reserved.id, upload }, 201)
 }

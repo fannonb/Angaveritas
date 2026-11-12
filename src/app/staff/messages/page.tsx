@@ -6,8 +6,8 @@ import { threadsAwaitingReply } from '@/lib/data/messages'
 export const metadata = { title: 'Client messages' }
 
 export default async function MessagesInbox() {
-  await requireStaff(['analyst', 'admin'])
-  const threads = await threadsAwaitingReply()
+  const user = await requireStaff(['analyst', 'admin'])
+  const threads = await threadsAwaitingReply(user.role === 'analyst' ? user.id : undefined)
   return (
     <div className="space-y-5">
       <div>

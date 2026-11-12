@@ -5,7 +5,7 @@ import { AppTopbar } from '@/components/app/AppTopbar'
 import { AppIcon } from '@/components/app/icons'
 import NavLinks from '@/components/app/NavLinks'
 import { NotificationButton, NotificationProvider } from '@/components/app/NotificationPanel'
-import { logoutAction, resendVerificationAction } from '@/app/(auth)/actions'
+import { logoutAction } from '@/app/(auth)/actions'
 import { requireClient } from '@/lib/auth/session'
 import { clientUnreadCount } from '@/lib/data/messages'
 import { listNotifications } from '@/lib/data/misc'
@@ -67,13 +67,6 @@ export default async function PortalLayout({ children }: { children: React.React
             actions={<NotificationButton />}
             user={{ name: user.full_name, detail: user.email, href: '/portal/account' }}
           />
-          {!user.email_verified_at && (
-            <form action={resendVerificationAction} className="app-banner">
-              <AppIcon name="mail" />
-              <span className="flex-1">Please confirm your email address ({user.email}). We sent you a link. You need it before you can accept a proposal.</span>
-              <button className="btn btn-secondary btn-xs" type="submit">Resend email</button>
-            </form>
-          )}
           <main className="app-content">{children}</main>
           <footer className="app-foot">
             <span>© {new Date().getFullYear()} AngaVeritas · <Link href="/privacy">Privacy</Link> · <Link href="/terms">Terms</Link></span>

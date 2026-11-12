@@ -12,10 +12,11 @@ vi.mock('@/lib/db', () => ({
     return work(tx)
   }),
 }))
-import { mayReadFile, getFile } from '@/lib/data/files'
+import { createPendingFile, mayReadFile, getFile } from '@/lib/data/files'
 import { createReport, updateReport, publishReport, setReportStatus } from '@/lib/data/reports'
 import { acceptProposal, declineProposal } from '@/lib/data/proposals'
-import { assignProjectTeam } from '@/lib/data/projects'
+import { assignProjectTeam, projectFor } from '@/lib/data/projects'
+import { listInspections } from '@/lib/data/inspections'
 import { setDisabled, setStaffRole } from '@/lib/data/users'
 import { listMessages, postMessage, markRead, clientUnreadCount, threadsAwaitingReply, dismissReply } from '@/lib/data/messages'
 import { submitPaymentNotice, recordPayment, configureMonitoring, generateMonitoringCycles, issueInvoice, completeProjectByClient, reopenProject } from '@/lib/data/operations'
@@ -52,6 +53,26 @@ describe.skipIf(process.env.RUN_DATABASE_TESTS !== '1')('workflow boundary regre
   }, 30000)
   afterAll(async () => {
     if (state.sql) { await state.sql.unsafe(`drop schema if exists "${schema}" cascade`); await state.sql.end() }
+  })
+  it('limits project access to assigned analysts and filters visits for field agents', async () => {
+    const x = await fixture()
+    const [other] = await state.sql`insert into users(email,full_name,role)
+      values ('other-analyst@security.invalid','Other analyst','analyst') returning id`
+    await state.sql`insert into inspections(project_id,title,agent_id) values (${x.p},'Other visit',${analyst})`
+    expect(await projectFor({ id: other.id, role: 'analyst' }, x.p)).toBeNull()
+    expect(await projectFor({ id: analyst, role: 'analyst' }, x.p)).toMatchObject({ canManage: true })
+    expect(await projectFor({ id: admin, role: 'admin' }, x.p)).toMatchObject({ canManage: true })
+    expect((await listInspections(x.p, agent)).map(visit => visit.id)).toEqual([x.i])
+  })
+  it('limits pending reservations atomically even when uploads start concurrently', async () => {
+    const x = await fixture()
+    const reservations = await Promise.all(Array.from({ length: 31 }, (_, index) => createPendingFile({
+      projectId: x.p, inspectionId: null, category: 'client_document', mediaType: 'document',
+      filename: 'fixture.pdf', mime: 'application/pdf', size: 512, storageKey: `quota/${x.p}/${index}`,
+      caption: null, visibleToClient: true, uploadedBy: client,
+    })))
+    expect(reservations.filter(result => result.id)).toHaveLength(30)
+    expect(reservations.filter(result => result.error)).toHaveLength(1)
   })
   it('freezes submitted findings and notes until an explicit reopen', async () => {
     const x = await fixture()

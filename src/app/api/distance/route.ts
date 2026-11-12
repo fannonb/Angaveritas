@@ -8,6 +8,7 @@ export async function GET(req: Request) {
   const lng = Number(params.get('lng'))
   if (!Number.isFinite(lat) || !Number.isFinite(lng) || !inKenya(lat, lng)) return json({ error: 'Please choose a location in Kenya.' }, 400)
   if (await rateLimited(`distance:${hashIp(clientIp(req))}`, 30, 60_000)) return json({ error: 'Too many requests. Please wait a minute.' }, 429)
+  if (await rateLimited('routing:global', 300, 60_000)) return json({ error: 'Distance lookup is busy. Please try again in a minute.' }, 429)
   const { config } = await getActivePricing()
   return json(await roadDistance(config.origin, { lat, lng }))
 }

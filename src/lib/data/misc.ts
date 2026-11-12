@@ -71,19 +71,6 @@ export async function createEnquiry(e: Omit<EnquiryRow, 'id' | 'status' | 'creat
   return row.id
 }
 
-export async function recentEnquiriesFromIp(ipHash: string) {
-  const [row] = await sql<{ n: number }[]>`
-    select count(*)::int as n from enquiries where ip_hash = ${ipHash} and created_at > now() - interval '1 hour'`
-  return row.n
-}
-
-/** Enquiries already received for this address today, so the acknowledgement email cannot be used to flood an inbox. */
-export async function recentEnquiriesForEmail(email: string) {
-  const [row] = await sql<{ n: number }[]>`
-    select count(*)::int as n from enquiries where lower(email) = lower(${email}) and created_at > now() - interval '1 day'`
-  return row.n
-}
-
 export async function listEnquiries(status: EnquiryRow['status'] | 'open' | 'all' = 'open') {
   return sql<EnquiryRow[]>`
     select * from enquiries

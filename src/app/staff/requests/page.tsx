@@ -12,7 +12,7 @@ export default async function StaffRequests({ searchParams: searchParamsPromise 
   const user = await requireStaff(['analyst', 'admin'])
   const status = (searchParams.status && (searchParams.status in requestStatusLabels || ['open', 'all'].includes(searchParams.status)) ? searchParams.status : 'open') as RequestStatus | 'open' | 'all'
   const owner = searchParams.owner === 'unassigned' || searchParams.owner === 'me' ? searchParams.owner : undefined
-  const [rows, counts] = await Promise.all([listRequests({ status, search: searchParams.q, owner, viewerId: user.id }), requestCounts()])
+  const [rows, counts] = await Promise.all([listRequests({ status, search: searchParams.q, owner, viewerId: user.id, analystId: user.role === 'analyst' ? user.id : undefined }), requestCounts()])
   const filters: [string, string, number | undefined][] = [
     ['open', 'Open', (counts.submitted ?? 0) + (counts.in_review ?? 0) + (counts.proposal_sent ?? 0)],
     ['submitted', 'New', counts.submitted],

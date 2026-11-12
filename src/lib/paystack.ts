@@ -9,6 +9,7 @@ export class PaymentError extends Error {
 export function paystackConfig() {
   const secret = process.env.PAYSTACK_SECRET_KEY ?? ''
   const environment = process.env.PAYSTACK_MODE
+  if (process.env.VERCEL_ENV === 'production' && environment !== 'live') return null
   const actorId = process.env.PAYSTACK_ACTOR_ID ?? ''
   if (!['test', 'live'].includes(environment ?? '') || !secret.startsWith(`sk_${environment}_`) ||
       !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(actorId)) return null

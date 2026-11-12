@@ -5,7 +5,7 @@ import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
-import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3'
+import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3'
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 
 // Private file storage for evidence, client documents and report PDFs.
@@ -21,6 +21,8 @@ export const MAX_UPLOAD_BYTES = 200 * 1024 * 1024
 
 const driver = () => (process.env.STORAGE_DRIVER === 'supabase' ? 'supabase' : process.env.STORAGE_DRIVER === 'r2' ? 'r2' : 'local')
 const localRoot = () => path.resolve(process.env.STORAGE_DIR ?? './storage')
+const immutablePrefix = 'write-once/'
+export const legacyR2Upload = (key: string) => driver() === 'r2' && !key.startsWith(immutablePrefix)
 
 function localPath(key: string) {
   const p = path.resolve(localRoot(), key)
@@ -61,23 +63,24 @@ export function makeStorageKey(scope: string, filename: string) {
     .replace(/[^\w.\-]+/g, '-')
     .replace(/-+/g, '-')
     .slice(-80)
-  return `${scope}/${crypto.randomUUID()}-${safe || 'file'}`
+  return `${driver() === 'r2' ? immutablePrefix : ''}${scope}/${crypto.randomUUID()}-${safe || 'file'}`
 }
 
 /** Where the browser should PUT the file bytes. */
 export async function uploadTarget(fileId: string, key: string, size: number): Promise<{ url: string; headers: Record<string, string> }> {
   if (driver() === 'local') return { url: `/api/files/${fileId}/upload`, headers: {} }
   if (driver() === 'r2') {
+    if (legacyR2Upload(key)) throw new Error('This upload expired. Select the file again.')
     const { client, bucket } = r2()
-    // A short-lived signed PUT: the browser sends the bytes straight to R2. The declared size is part of
-    // the signature, so the link cannot be used to store a larger file than the one we approved.
-    const url = await getSignedUrl(client, new PutObjectCommand({ Bucket: bucket, Key: key, ContentLength: size }), { expiresIn: 900, signableHeaders: new Set(['content-length']) })
-    return { url, headers: {} }
+    const url = await getSignedUrl(client, new PutObjectCommand({
+      Bucket: bucket, Key: key, ContentLength: size, IfNoneMatch: '*',
+    }), { expiresIn: 900, signableHeaders: new Set(['content-length', 'if-none-match']) })
+    return { url, headers: { 'If-None-Match': '*' } }
   }
   const s = supa()
   const res = await fetch(`${s.url}/storage/v1/object/upload/sign/${s.bucket}/${encKey(key)}`, {
     method: 'POST',
-    headers: { ...s.auth, 'Content-Type': 'application/json' },
+    headers: { ...s.auth, 'Content-Type': 'application/json', 'x-upsert': 'false' },
     body: '{}',
   })
   if (!res.ok) throw new Error(`Could not prepare upload (${res.status})`)
@@ -97,14 +100,27 @@ export async function writeLocal(key: string, body: ReadableStream<Uint8Array>, 
       else cb(null, chunk)
     },
   })
-  const handle = await fsp.open(target, 'wx')
+  const staging = `${target}.upload`
+  const handle = await fsp.open(staging, 'wx')
   try {
     await pipeline(Readable.fromWeb(body as never), limiter, handle.createWriteStream())
-  } catch (err) {
-    await fsp.rm(target, { force: true })
-    throw err
+    if (seen !== maxBytes) throw new Error('File size does not match the upload')
+    // Publish only a complete file. A hard link fails if the final name already exists.
+    await fsp.link(staging, target)
+  } finally {
+    await fsp.rm(staging, { force: true })
   }
   return seen
+}
+
+export async function uploadedObjectSize(key: string) {
+  if (driver() === 'local') return (await fsp.stat(localPath(key))).size
+  if (driver() === 'r2') {
+    const { client, bucket } = r2()
+    const response = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: key }))
+    return response.ContentLength
+  }
+  return (await inspectObject(key)).size
 }
 
 /** Size, SHA-256 and the first bytes (for EXIF) of a stored object. */
@@ -163,7 +179,7 @@ export async function serveObject(key: string, opts: { filename: string; mime: s
       new GetObjectCommand({ Bucket: bucket, Key: key, ResponseContentType: opts.mime, ResponseContentDisposition: disposition }),
       { expiresIn: 60 },
     )
-    return Response.redirect(signed, 302)
+    return new Response(null, { status: 302, headers: { Location: signed, 'Cache-Control': 'private, no-store' } })
   }
   const s = supa()
   const res = await fetch(`${s.url}/storage/v1/object/sign/${s.bucket}/${encKey(key)}`, {
@@ -175,31 +191,40 @@ export async function serveObject(key: string, opts: { filename: string; mime: s
   const data = (await res.json()) as { signedURL: string }
   const signed = new URL(`${s.url}/storage/v1${data.signedURL}`)
   if (!opts.inline) signed.searchParams.set('download', opts.filename)
-  return Response.redirect(signed.toString(), 302)
+  return new Response(null, { status: 302, headers: { Location: signed.toString(), 'Cache-Control': 'private, no-store' } })
 }
 
 export async function deleteObject(key: string) {
   if (driver() === 'local') {
     await fsp.rm(localPath(key), { force: true })
+    await fsp.rm(`${localPath(key)}.upload`, { force: true })
     return
   }
   if (driver() === 'r2') {
     const { client, bucket } = r2()
-    await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }))
+    await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }), { abortSignal: AbortSignal.timeout(5_000) })
     return
   }
   const s = supa()
-  await fetch(`${s.url}/storage/v1/object/${s.bucket}`, {
+  const response = await fetch(`${s.url}/storage/v1/object/${s.bucket}`, {
     method: 'DELETE',
     headers: { ...s.auth, 'Content-Type': 'application/json' },
     body: JSON.stringify({ prefixes: [key] }),
+    signal: AbortSignal.timeout(5_000),
+    redirect: 'error',
   })
+  if (!response.ok) throw new Error('Could not remove the stored object.')
 }
 
-/** Optional antivirus service: POST raw bytes, require an explicit clean result. */
-export async function scanObject(key: string) {
+export class RejectedUpload extends Error {}
+
+/** POST raw bytes to the configured scanner, and accept an explicit clean result. */
+export async function scanObject(key: string, required = false) {
   const endpoint = process.env.FILE_SCAN_URL
-  if (!endpoint) return
+  if (!endpoint) {
+    if (required) throw new Error('File scanning is temporarily unavailable.')
+    return false
+  }
   const url = new URL(endpoint)
   if (url.protocol !== 'https:' && !['localhost','127.0.0.1'].includes(url.hostname)) throw new Error('The file scanning endpoint must use HTTPS.')
   let body: ReadableStream<Uint8Array>
@@ -216,6 +241,9 @@ export async function scanObject(key: string) {
     if(!response.ok || !response.body) throw new Error('Unable to read the upload for scanning.')
     body = response.body
   }
-  const response = await fetch(url,{method:'POST',headers:{'Content-Type':'application/octet-stream',...(process.env.FILE_SCAN_KEY ? {Authorization:`Bearer ${process.env.FILE_SCAN_KEY}`} : {})},body,duplex:'half',signal:AbortSignal.timeout(30000)} as RequestInit & {duplex:string})
-  if(!response.ok || (await response.json()).clean !== true) throw new Error('The file was not cleared by the scanning service. Contact the team.')
+  const response = await fetch(url,{method:'POST',headers:{'Content-Type':'application/octet-stream',...(process.env.FILE_SCAN_KEY ? {Authorization:`Bearer ${process.env.FILE_SCAN_KEY}`} : {})},body,duplex:'half',signal:AbortSignal.timeout(30000),redirect:'error'} as RequestInit & {duplex:string})
+  const result = response.ok ? await response.json().catch(() => null) : null
+  if (result?.clean === false) throw new RejectedUpload('The file did not pass the security scan.')
+  if (result?.clean !== true) throw new Error('File scanning is temporarily unavailable.')
+  return true
 }

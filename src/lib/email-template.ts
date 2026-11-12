@@ -19,45 +19,26 @@ function bodyLines(body: string) {
   return cut >= 0 ? lines.slice(0, cut) : lines
 }
 
-type Block = { kind: 'text'; text: string } | { kind: 'button'; url: string; label: string }
-
-// Paragraphs are separated by blank lines. A line starting with "Open: " becomes a button.
-function toBlocks(lines: string[]): Block[] {
-  const blocks: Block[] = []
-  let para: string[] = []
-  const flush = () => {
-    if (para.length) blocks.push({ kind: 'text', text: para.join(' ') })
-    para = []
+/** Only a separate, server-controlled path can become an email action. */
+export function emailActionUrl(path: string | null | undefined, siteUrl: string) {
+  if (!path || !path.startsWith('/') || path.startsWith('//') || /[\u0000-\u001f\u007f\\]/u.test(path)) return null
+  try {
+    const site = new URL(siteUrl)
+    const url = new URL(path, site)
+    const local = site.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(site.hostname)
+    return (site.protocol === 'https:' || local) && url.origin === site.origin ? url.href : null
+  } catch {
+    return null
   }
-  for (const raw of lines) {
-    const line = raw.trim()
-    if (!line) { flush(); continue }
-    if (line.startsWith('Open: ')) {
-      flush()
-      blocks.push({ kind: 'button', url: line.slice(6).trim(), label: 'Open in AngaVeritas' })
-      continue
-    }
-    para.push(line)
-  }
-  flush()
-  return blocks
 }
 
-function linkify(text: string) {
-  return esc(text).replace(/(https?:\/\/[^\s<]+)/g, (u) => `<a href="${u}" style="color:${emailBrand.gold};text-decoration:underline;word-break:break-all">${u}</a>`)
-}
-
-export function renderEmailHtml(subject: string, body: string, opts: { logoUrl: string; siteUrl: string; location: string; email: string }) {
-  const blocks = toBlocks(bodyLines(body))
-  const content = blocks
-    .map((b) => {
-      if (b.kind === 'button') {
-        return `<tr><td style="padding:6px 0 22px"><a href="${esc(b.url)}" style="display:inline-block;background:${emailBrand.ink};color:#ffffff;text-decoration:none;font-weight:600;font-size:14px;padding:12px 24px;border-radius:4px">${esc(b.label)}</a></td></tr>`
-      }
-      return `<tr><td style="padding:0 0 16px;font-size:15px;line-height:1.65;color:${emailBrand.ink}">${linkify(b.text)}</td></tr>`
-    })
-    .join('')
-  const preheader = blocks.find((b) => b.kind === 'text')?.text ?? subject
+export function renderEmailHtml(subject: string, body: string, opts: { logoUrl: string; siteUrl: string; location: string; email: string; actionPath?: string | null }) {
+  const paragraphs = bodyLines(body).join('\n').split(/\n\s*\n/).map(text => text.trim()).filter(Boolean)
+  const action = emailActionUrl(opts.actionPath, opts.siteUrl)
+  const content = paragraphs.map(text =>
+    `<tr><td style="padding:0 0 16px;font-size:15px;line-height:1.65;color:${emailBrand.ink}">${esc(text).replace(/\n/g, '<br>')}</td></tr>`,
+  ).join('')
+  const preheader = paragraphs[0] ?? subject
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -77,6 +58,7 @@ export function renderEmailHtml(subject: string, body: string, opts: { logoUrl: 
     <table role="presentation" width="100%" cellspacing="0" cellpadding="0">
       <tr><td style="padding:0 0 18px"><h1 style="margin:0;font-size:20px;line-height:1.35;font-weight:600;color:${emailBrand.ink}">${esc(subject)}</h1></td></tr>
       ${content}
+      ${action ? `<tr><td style="padding:6px 0 22px"><a href="${esc(action)}" style="display:inline-block;background:${emailBrand.ink};color:#ffffff;text-decoration:none;font-weight:600;padding:12px 24px;border-radius:4px">Open in AngaVeritas</a></td></tr>` : ''}
     </table>
   </td></tr>
   <tr><td style="background:${emailBrand.footer};padding:20px 22px;font-size:12px;line-height:1.6;color:${emailBrand.graphite}">

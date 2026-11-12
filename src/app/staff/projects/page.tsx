@@ -10,10 +10,10 @@ export const metadata = { title: 'Projects' }
 export default async function StaffProjects({ searchParams: searchParamsPromise }: { searchParams: Promise<{ stage?: string; q?: string; need?: string }> }) {
   const searchParams = await searchParamsPromise
   const user = await requireStaff()
-  const need = searchParams.need && searchParams.need in projectNeeds ? (searchParams.need as ProjectNeed) : undefined
-  const stage = (searchParams.stage && ([...projectStages, 'active', 'all'] as string[]).includes(searchParams.stage) ? searchParams.stage : 'active') as ProjectStage | 'active' | 'all'
-  const [rows, counts] = await Promise.all([listProjectsForStaff(user, { stage, search: searchParams.q, need }), projectStageCounts()])
   const manager = user.role !== 'field_agent'
+  const need = manager && searchParams.need && Object.hasOwn(projectNeeds, searchParams.need) ? (searchParams.need as ProjectNeed) : undefined
+  const stage = (searchParams.stage && ([...projectStages, 'active', 'all'] as string[]).includes(searchParams.stage) ? searchParams.stage : 'active') as ProjectStage | 'active' | 'all'
+  const [rows, counts] = await Promise.all([listProjectsForStaff(user, { stage, search: searchParams.q, need }), manager ? projectStageCounts(user.role === 'analyst' ? user.id : undefined) : null])
   return (
     <div className="space-y-5">
       <div>
@@ -25,7 +25,7 @@ export default async function StaffProjects({ searchParams: searchParamsPromise 
           {(['active', ...projectStages, 'all'] as const).map((s) => (
             <Link key={s} href={`/staff/projects?stage=${s}`} className={`btn btn-xs ${stage === s ? 'btn-primary' : 'btn-secondary'}`}>
               {s === 'active' ? 'Active' : s === 'all' ? 'All' : stageLabels[s]}
-              {manager && s !== 'active' && s !== 'all' && counts[s] ? ` (${counts[s]})` : ''}
+              {s !== 'active' && s !== 'all' && counts?.[s] ? ` (${counts[s]})` : ''}
             </Link>
           ))}
         </nav>

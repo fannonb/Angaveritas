@@ -1,6 +1,7 @@
 import 'server-only'
 import { sql, withActor } from '@/lib/db'
 import type { SessionUser } from '@/lib/auth/session'
+import type { Fragment } from 'postgres'
 import type { Health, ProjectStage } from '@/lib/labels'
 import { TECHNICAL_EVENT_PATTERN } from '@/lib/workflow'
 import { briefAnswers, briefProfile, validateServiceBrief } from '@/lib/service-briefs'
@@ -60,14 +61,16 @@ export type ProjectView = ProjectRow & {
   published_reports: number
 }
 
-const view = () => sql`
+const view = (agentId?: string) => {
+  const assignedVisit = agentId ? sql`(i.agent_id=${agentId} or (i.agent_id is null and p.field_agent_id=${agentId}))` : sql`true`
+  return sql`
   select p.*, w.hold_reason work_hold_reason,(w.brief_approved_version=w.brief_version) brief_approved,w.required_sites,
     c.full_name as client_name, c.email as client_email, c.phone as client_phone, c.based_in as client_based_in,
     a.full_name as analyst_name, f.full_name as agent_name, r.reference as request_reference,
     (select min(i.scheduled_for)::text from inspections i
-       where i.project_id = p.id and i.status in ('scheduled', 'in_progress') and i.scheduled_for >= current_date) as next_inspection,
+       where i.project_id = p.id and i.status in ('scheduled', 'in_progress') and i.scheduled_for >= current_date and ${assignedVisit}) as next_inspection,
     (select i.arrival_window from inspections i
-       where i.project_id = p.id and i.status in ('scheduled', 'in_progress') and i.scheduled_for >= current_date
+       where i.project_id = p.id and i.status in ('scheduled', 'in_progress') and i.scheduled_for >= current_date and ${assignedVisit}
        order by i.scheduled_for, i.created_at limit 1) as next_arrival,
     (select count(*)::int from reports rp where rp.project_id = p.id and rp.status = 'published') as published_reports
   from projects p
@@ -76,26 +79,44 @@ const view = () => sql`
   left join users a on a.id = p.lead_analyst_id
   left join users f on f.id = p.field_agent_id
   left join requests r on r.id = p.request_id`
+}
 
 // ---------- Access ----------
 
 export type ProjectAccess = {
   project: ProjectView
   isClient: boolean
-  /** Analysts and admins: full control. */
+  /** Assigned analysts and admins: full control. */
   canManage: boolean
   /** Field agents on this project, plus managers: can record fieldwork. */
   canFieldwork: boolean
 }
 
+// The caller's project alias is p. Admins remain the cross-project reviewers.
+export function analystProjectScope(analystId: string | Fragment) {
+  return sql`(p.lead_analyst_id is not distinct from ${analystId}
+    or p.field_agent_id is not distinct from ${analystId} or exists (
+    select 1 from inspections scope_visit where scope_visit.project_id=p.id and scope_visit.agent_id=${analystId}
+      and scope_visit.status in ('scheduled','in_progress','submitted')
+  ))`
+}
+
+// Intake can be shared until it is linked to a project. Follow-ups inherit the project's access.
+export function analystRequestScope(analystId: string | Fragment) {
+  return sql`not exists (
+    select 1 from projects p where p.client_id=r.client_id
+      and (p.request_id=r.id or p.id=r.parent_project_id) and not ${analystProjectScope(analystId)}
+  )`
+}
+
 /**
  * Loads a project if — and only if — this user may see it:
- * the client who owns it, a field agent assigned to it (or to one of its
- * inspections), or any analyst or admin.
+ * its client, an assigned analyst or field agent, or an admin.
  */
 export async function projectFor(user: Pick<SessionUser, 'id' | 'role'>, id: string): Promise<ProjectAccess | null> {
   if (!/^[0-9a-f-]{36}$/i.test(id)) return null
-  const [project] = await sql<ProjectView[]>`${view()} where p.id = ${id}`
+  const [project] = await sql<ProjectView[]>`${view(user.role === 'field_agent' ? user.id : undefined)} where p.id = ${id}
+    and ${user.role === 'analyst' ? analystProjectScope(user.id) : sql`true`}`
   if (!project) return null
   if (user.role === 'client') {
     return project.client_id === user.id ? { project, isClient: true, canManage: false, canFieldwork: false } : null
@@ -134,11 +155,12 @@ export async function listProjectsForStaff(user: SessionUser, opts: { stage?: Pr
   const stage = opts.stage ?? 'active'
   const q = opts.search?.trim() ? `%${opts.search.trim().replace(/[%_]/g, '')}%` : null
   return sql<ProjectView[]>`
-    ${view()}
+    ${view(user.role === 'field_agent' ? user.id : undefined)}
     where ${stage === 'all' ? sql`true` : stage === 'active' ? sql`p.stage <> 'closed'` : sql`p.stage = ${stage}`}
       and ${opts.clientId ? sql`p.client_id = ${opts.clientId}` : sql`true`}
       and ${
-        opts.need === 'at_risk' ? sql`p.health in ('at_risk', 'high_risk')`
+        user.role === 'field_agent' ? sql`true`
+        : opts.need === 'at_risk' ? sql`p.health in ('at_risk', 'high_risk')`
         : opts.need === 'unassigned' ? sql`p.stage in ('onboarding', 'planning', 'fieldwork') and (p.field_agent_id is null or p.lead_analyst_id is null)`
         : opts.need === 'unpaid' ? sql`p.payment_status = 'awaiting_payment'`
         : opts.need === 'confirm' ? sql`exists(select 1 from payment_notices n where n.project_id=p.id and n.status='pending')`
@@ -151,15 +173,16 @@ export async function listProjectsForStaff(user: SessionUser, opts: { stage?: Pr
       and ${
         user.role === 'field_agent'
           ? sql`(p.field_agent_id = ${user.id} or exists (select 1 from inspections i where i.project_id = p.id and i.agent_id = ${user.id}))`
-          : sql`true`
+          : user.role === 'analyst' ? analystProjectScope(user.id) : sql`true`
       }
       and ${q ? sql`(p.code ilike ${q} or p.title ilike ${q} or c.full_name ilike ${q} or p.location_label ilike ${q} or p.county ilike ${q})` : sql`true`}
     order by case p.health when 'high_risk' then 0 when 'at_risk' then 1 else 2 end, p.updated_at desc
     limit 300`
 }
 
-export async function projectStageCounts() {
-  const rows = await sql<{ stage: ProjectStage; n: number }[]>`select stage, count(*)::int as n from projects group by stage`
+export async function projectStageCounts(analystId?: string) {
+  const rows = await sql<{ stage: ProjectStage; n: number }[]>`select p.stage, count(*)::int as n from projects p
+    where ${analystId ? analystProjectScope(analystId) : sql`true`} group by p.stage`
   return Object.fromEntries(rows.map((r) => [r.stage, r.n])) as Partial<Record<ProjectStage, number>>
 }
 

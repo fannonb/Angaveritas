@@ -9,7 +9,7 @@ export const metadata = { title: 'Team' }
 
 const roleHelp = [
   ['Field agent', 'Sees only the inspections and projects assigned to them: site details, contacts, checklist. Records findings and uploads evidence. No client finances or messages.'],
-  ['Analyst', 'Delivers projects: qualifies requests, writes proposals, assigns the team, plans visits, reviews other people’s visits, writes reports for an admin to approve, and messages clients. Sees billing but does not change it.'],
+  ['Analyst', 'Qualifies shared intake and delivers assigned projects. Plans visits, reviews eligible visits on those projects, writes reports for an admin to approve, and sees project billing.'],
   ['Admin', 'Everything an analyst can do, plus publishing reports, invoices, payments, refunds and monitoring fees, reopening projects, pricing, the team, integrations, revenue and the audit log.'],
 ]
 

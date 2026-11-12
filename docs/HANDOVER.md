@@ -85,6 +85,7 @@ Passwords and API keys for shared tools (for example the DNS panel) go into a sh
 - **Bucket:** `angaveritas` (private; files are served only through signed, short-lived links)
 - **CORS rules** on the bucket allow uploads from `https://angaveritas.com` and `http://localhost:3000`. If the
   site gets a new domain, add it here (R2 → angaveritas → Settings → CORS policy).
+  Include `If-None-Match` in AllowedHeaders for browser PUTs. The upload URL signs this header so an upload can create its object once.
 - **Access keys:** create a new R2 key pair under R2 → Manage API Tokens, give it Object Read & Write on the
   `angaveritas` bucket only, and store it in Vercel as `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY`.
 - **Command-line access (optional):** `npx wrangler login` in the project folder. Wrangler needs an account API token
@@ -120,13 +121,24 @@ Passwords and API keys for shared tools (for example the DNS panel) go into a sh
 
 **Required in production:** `DATABASE_URL`, `APP_URL`, `STORAGE_DRIVER` (= `r2`), `R2_ACCOUNT_ID`, `R2_BUCKET`,
 `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `EMAIL_FROM`, `NOTIFY_EMAIL`, `RESEND_API_KEY`, `IP_HASH_SALT`,
-`WORKER_SECRET`, `WORKER_USER_ID`, `CRON_SECRET`.
+`WORKER_SECRET`, `WORKER_USER_ID`, `CRON_SECRET`, `STAFF_MFA_KEY`, `FILE_SCAN_URL`.
 
 **Billing details shown on invoices and the Payments page (still to confirm):** `NEXT_PUBLIC_BILLING_NAME`,
 `NEXT_PUBLIC_KRA_PIN`, `NEXT_PUBLIC_BILLING_ADDRESS`, `NEXT_PUBLIC_PAYBILL`, `NEXT_PUBLIC_BANK_DETAILS`.
 
 **Optional:** `NEXT_PUBLIC_BOOKING_URL`, `NEXT_PUBLIC_WHATSAPP`, `NEXT_PUBLIC_USD_RATE`, `GEOCODER_URL`, `ROUTER_URL`,
-`FILE_SCAN_URL`, `FILE_SCAN_KEY`.
+`FILE_SCAN_KEY`, `DATABASE_CA_CERT`. Set `FILE_SCAN_KEY` when the scanner requires bearer authentication.
+
+### Security rollout
+
+1. Generate and back up a dedicated 32-byte base64url `STAFF_MFA_KEY`. Confirm production email delivery and configure the file scanner. Staff passwords lead to mailbox-authorized authenticator setup on the first sign-in. Existing staff sessions and outstanding authentication links expire during migration.
+2. Add the R2 CORS header above before publishing the application. Keep the bucket private. Rotate its scoped R2 credentials at rollout to invalidate previously issued upload URLs. Pending uploads from the previous release require reselecting the file.
+3. Apply the database migrations with the migration owner. Configure the dedicated application login with [the runtime role script](../scripts/configure-runtime-role.sql). Set its password interactively using `\password angaveritas_runtime` in psql and use that login in Vercel. Keep the owner connection for migrations. Apply the runtime grants again after adding app tables in future migrations. Use verified TLS for the remote pooler and enable Supabase SSL enforcement.
+4. Verify client registration, staff enrollment and sign-in, signed upload and download, and Paystack live mode after deploying. For existing R2 evidence and reports, compare object bytes against stored SHA-256 hashes and investigate any mismatch.
+
+Analysts work on projects where they are assigned as lead analyst or field staff. Admins handle cross-project review and assignment. Intake remains shared until a request links to a project. Client uploads have a 5 GiB account quota and staff uploads have a 50 GiB quota.
+
+If a staff member loses their authenticator, verify their identity through the team’s normal recovery channel. A database operator can remove that user’s `staff_mfa` row, revoke their sessions and unused setup tokens in the same transaction, and have them sign in to enroll again. A password reset preserves the existing authenticator.
 
 Environment changes take effect only after the next deployment.
 

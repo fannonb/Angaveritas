@@ -1,10 +1,17 @@
 import 'server-only'
 import crypto from 'node:crypto'
+import { isIP } from 'node:net'
 import { sql } from '@/lib/db'
 
+export function requestIp(headers: Pick<Headers, 'get'>) {
+  const forwarded = process.env.VERCEL === '1' ? headers.get('x-vercel-forwarded-for') ?? headers.get('x-forwarded-for')
+    : process.env.TRUST_PROXY_HEADERS === 'true' ? headers.get('x-forwarded-for') ?? headers.get('x-real-ip') : null
+  const ip = forwarded?.split(',')[0].trim() ?? ''
+  return isIP(ip) ? ip : 'unknown'
+}
+
 export function clientIp(req: Request) {
-  const fwd = req.headers.get('x-forwarded-for')
-  return (fwd?.split(',')[0] ?? req.headers.get('x-real-ip') ?? 'unknown').trim()
+  return requestIp(req.headers)
 }
 
 export function hashIp(ip: string) {
@@ -18,9 +25,9 @@ export function hashIp(ip: string) {
 export function sameOrigin(req: Request) {
   const origin = req.headers.get('origin')
   if (!origin) return req.method === 'GET' || req.method === 'HEAD'
-  const host = req.headers.get('x-forwarded-host') ?? req.headers.get('host')
   try {
-    return new URL(origin).host === host
+    const configured = process.env.VERCEL_ENV === 'production' || process.env.TRUST_PROXY_HEADERS === 'true' ? process.env.APP_URL : undefined
+    return new URL(origin).origin === new URL(configured || req.url).origin
   } catch {
     return false
   }
@@ -30,17 +37,17 @@ export function sameOrigin(req: Request) {
 // from abuse). Counts are shared through the database so they hold across
 // server instances; if the database is unreachable, each instance counts on
 // its own rather than refusing every visitor.
-export async function rateLimited(key: string, limit: number, windowMs: number) {
+export async function rateLimited(key: string, limit: number, windowMs: number, cost = 1) {
   try {
     const [row] = await sql<{ count: number }[]>`
-      insert into rate_limits (key, count, reset_at) values (${key}, 1, now() + make_interval(secs => ${windowMs / 1000}))
+      insert into rate_limits (key, count, reset_at) values (${key}, ${cost}, now() + make_interval(secs => ${windowMs / 1000}))
       on conflict (key) do update set
-        count = case when rate_limits.reset_at < now() then 1 else rate_limits.count + 1 end,
+        count = case when rate_limits.reset_at < now() then excluded.count else least(rate_limits.count::bigint + excluded.count, 2147483647)::int end,
         reset_at = case when rate_limits.reset_at < now() then excluded.reset_at else rate_limits.reset_at end
       returning count`
     return row.count > limit
   } catch {
-    return rateLimitedLocally(key, limit, windowMs)
+    return rateLimitedLocally(key, limit, windowMs, cost)
   }
 }
 
@@ -49,15 +56,15 @@ export async function removeExpiredRateLimits() {
 }
 
 const buckets = new Map<string, { count: number; reset: number }>()
-function rateLimitedLocally(key: string, limit: number, windowMs: number) {
+function rateLimitedLocally(key: string, limit: number, windowMs: number, cost: number) {
   const now = Date.now()
   const b = buckets.get(key)
   if (!b || b.reset < now) {
     if (buckets.size > 5000) buckets.clear()
-    buckets.set(key, { count: 1, reset: now + windowMs })
-    return false
+    buckets.set(key, { count: cost, reset: now + windowMs })
+    return cost > limit
   }
-  b.count++
+  b.count += cost
   return b.count > limit
 }
 

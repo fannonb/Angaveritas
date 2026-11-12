@@ -5,7 +5,7 @@ import { fmtDate, fmtDateTime, kes } from '@/components/app/format'
 import { requireStaff } from '@/lib/auth/session'
 import { listProjectsForStaff } from '@/lib/data/projects'
 import { listRequests } from '@/lib/data/requests'
-import { getUserById } from '@/lib/data/users'
+import { analystCanReadClient, getUserById } from '@/lib/data/users'
 import { setDisabledAction } from '../../actions'
 import { telHref, waHref } from '@/lib/site'
 
@@ -15,8 +15,8 @@ export default async function ClientPage({ params: paramsPromise }: { params: Pr
   const params = await paramsPromise
   const user = await requireStaff(['analyst', 'admin'])
   const c = await getUserById(params.id)
-  if (!c || c.role !== 'client') notFound()
-  const [requests, projects] = await Promise.all([listRequests({ status: 'all', clientId: c.id }), listProjectsForStaff(user, { stage: 'all', clientId: c.id })])
+  if (!c || c.role !== 'client' || user.role === 'analyst' && !(await analystCanReadClient(c.id, user.id))) notFound()
+  const [requests, projects] = await Promise.all([listRequests({ status: 'all', clientId: c.id, analystId: user.role === 'analyst' ? user.id : undefined }), listProjectsForStaff(user, { stage: 'all', clientId: c.id })])
   const value = projects.reduce((s, p) => s + (p.contract_value_kes ?? 0), 0)
   return (
     <div className="space-y-6">

@@ -7,14 +7,14 @@ export const metadata = { title: 'Clients' }
 
 export default async function ClientsPage({ searchParams: searchParamsPromise }: { searchParams: Promise<{ q?: string }> }) {
   const searchParams = await searchParamsPromise
-  await requireStaff(['analyst', 'admin'])
-  const clients = await listClients(searchParams.q)
+  const user = await requireStaff(['analyst', 'admin'])
+  const clients = await listClients(searchParams.q, user.role === 'analyst' ? user.id : undefined)
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="app-title">Clients</h1>
-          <p className="mt-1 text-ink-2">Everyone with a client account.</p>
+          <p className="mt-1 text-ink-2">{user.role === 'admin' ? 'Everyone with a client account.' : 'Clients from shared intake and your assigned projects.'}</p>
         </div>
         <form className="flex gap-2">
           <input className="input mt-0 w-64" name="q" defaultValue={searchParams.q} placeholder="Name, email or phone" />

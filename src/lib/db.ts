@@ -5,10 +5,15 @@ import { calendarDateType } from './database-types'
 // One small pool per server instance. `prepare: false` is required for
 // Supabase's transaction pooler (port 6543) and harmless elsewhere.
 const globalForDb = globalThis as unknown as { sql?: ReturnType<typeof postgres> }
+const databaseUrl = process.env.DATABASE_URL ?? ''
+const databaseHost = databaseUrl ? new URL(databaseUrl).hostname : 'localhost'
+const remoteDatabase = !['localhost', '127.0.0.1', '[::1]', ''].includes(databaseHost)
+const databaseCa = process.env.DATABASE_CA_CERT?.replace(/\\n/g, '\n')
 
 export const sql =
   globalForDb.sql ??
-  postgres(process.env.DATABASE_URL ?? '', {
+  postgres(databaseUrl, {
+    ...(remoteDatabase ? { ssl: { rejectUnauthorized: true, ...(databaseCa ? { ca: databaseCa } : {}) } } : {}),
     prepare: false,
     max: Number(process.env.DB_POOL_MAX ?? 3),
     // On Vercel a suspended function can wake holding sockets the pooler has already closed,

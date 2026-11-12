@@ -24,6 +24,8 @@ const checks = [], errors = []
 const password = 'Account-check-2026!'
 const newPassword = 'Updated-account-2026!'
 const email = 'client@accounts.test.invalid'
+const staffMfaKey = crypto.randomBytes(32).toString('base64url')
+const authenticators = new Map()
 let server, browser, log = ''
 const sha = s => crypto.createHash('sha256').update(s).digest('hex')
 async function check(name, work) { await work(); checks.push(name); console.log(`PASS ${name}`) }
@@ -55,11 +57,43 @@ async function tokenFor(userId, purpose) {
   return raw
 }
 async function emailLink(subject, route, recipient = email) {
-  const [msg] = await db`select body from email_outbox where subject=${subject} and ${recipient}=any(recipients) order by created_at desc limit 1`
-  assert.ok(msg, `${subject} should be queued`)
-  const link = msg.body.match(new RegExp(`${origin}${route}\\?token=[A-Za-z0-9_-]+`))?.[0]
-  assert.ok(link, 'Email must contain a working local account link')
-  return link
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const lines = log.split(/\r?\n/)
+    const index = lines.findLastIndex((line, i) => line === `[email] Subject: ${subject}` && lines[i - 1] === `[email] To: ${recipient}`)
+    if (index >= 0 && lines[index + 1]?.startsWith(`${origin}${route}?token=`)) return lines[index + 1]
+    await new Promise(resolve => setTimeout(resolve, 100))
+  }
+  throw new Error(`No development email link for ${subject}`)
+}
+function staffCode(encoded, step) {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'
+  const bits = [...encoded].map(char => alphabet.indexOf(char).toString(2).padStart(5, '0')).join('')
+  const key = Buffer.from(bits.match(/.{8}/g).map(byte => Number.parseInt(byte, 2)))
+  const counter = Buffer.alloc(8)
+  counter.writeBigUInt64BE(BigInt(step))
+  const mac = crypto.createHmac('sha1', key).update(counter).digest()
+  return String((mac.readUInt32BE(mac[19] & 15) & 0x7fff_ffff) % 1_000_000).padStart(6, '0')
+}
+async function loginStaff(page, account) {
+  await login(page, account)
+  if (!authenticators.has(account)) {
+    await alert(page, 'Check your staff email')
+    await page.goto(await emailLink('Set up AngaVeritas staff sign-in', '/staff-security', account))
+    const key = (await page.locator('main code').textContent()).trim()
+    const lastStep = Math.floor(Date.now() / 30_000) - 1
+    await fill(page, { password, code: staffCode(key, lastStep) })
+    await submit(page, 'Save authenticator')
+    await page.waitForURL(/\/login\?mfa_set=1/)
+    authenticators.set(account, { key, lastStep })
+    await login(page, account)
+  }
+  await page.waitForURL(/\/staff-security\?next=/)
+  const authenticator = authenticators.get(account)
+  const step = Math.max(Math.floor(Date.now() / 30_000), authenticator.lastStep + 1)
+  await fill(page, { code: staffCode(authenticator.key, step) })
+  await submit(page, 'Sign in')
+  await page.waitForURL(origin + '/staff')
+  authenticator.lastStep = step
 }
 try {
   await control.unsafe(`create schema "${schema}"`)
@@ -70,11 +104,11 @@ try {
   const stored = `scrypt$16384$8$1$${salt.toString('base64')}$${hash.toString('base64')}`
   const [adminUser] = await db`insert into users(email,full_name,role,password_hash,email_verified_at)
     values ('admin@accounts.test.invalid','Account Admin','admin',${stored},now()) returning id`
-  server = spawn(process.execPath, ['node_modules/next/dist/bin/next', process.env.ACCOUNT_TEST_PRODUCTION === '1' ? 'start' : 'dev', '-p', String(port)], {
+  server = spawn(process.execPath, ['node_modules/next/dist/bin/next', 'dev', '-p', String(port)], {
     windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env, DATABASE_URL: url.toString(), NEXT_DIST_DIR: '.next-accounts', APP_URL: origin,
       STORAGE_DRIVER: 'local', STORAGE_DIR: path.join(results, 'storage'), RESEND_API_KEY: '', NOTIFY_EMAIL: 'team@accounts.test.invalid',
-      WORKER_SECRET: '', WORKER_USER_ID: '', IP_HASH_SALT: 'isolated-account-test' },
+      WORKER_SECRET: '', WORKER_USER_ID: '', IP_HASH_SALT: 'isolated-account-test', STAFF_MFA_KEY: staffMfaKey },
   })
   const record = d => { log += d.toString(); fs.writeFileSync(path.join(results, 'server.log'), log) }
   server.stdout.on('data', record)
@@ -148,22 +182,21 @@ try {
     await client.goto(origin + '/login')
     await client.getByRole('link', { name: 'Create an account', exact: true }).click()
     await client.waitForURL(origin + '/register')
-    await fill(client, { fullName: 'X', email, phone: '+254700000001', whatsapp: '+447700900123', password })
+    await fill(client, { fullName: 'X', email, phone: '+254700000001', whatsapp: '+447700900123' })
     await selectLocation(client, 'KE', '30')
     await client.locator('[name="consent"]').check()
-    await submit(client, 'Create account')
+    await submit(client, 'Send confirmation link')
     await alert(client, 'Please enter your full name.')
     assert.equal(await client.locator('[name="email"]').inputValue(), email, 'Validation must preserve email')
-    assert.equal(await client.locator('[name="password"]').inputValue(), password, 'Validation must preserve password')
     assert.equal(await client.locator('[name="consent"]').isChecked(), true, 'Validation must preserve consent')
     await fill(client, { fullName: 'Account Client' })
     await db.unsafe("create function account_test_insert_failure() returns trigger language plpgsql as $$ begin raise exception 'Temporary registration failure'; end $$; create trigger account_test_insert_failure before insert on users for each row execute function account_test_insert_failure()")
-    await submit(client, 'Create account')
+    await submit(client, 'Send confirmation link')
     await alert(client, 'We could not finish creating your account')
     assert.equal(await client.locator('[name="email"]').inputValue(), email)
     await db.unsafe('drop trigger account_test_insert_failure on users; drop function account_test_insert_failure()')
-    await submit(client, 'Create account')
-    await client.waitForURL(origin + '/portal?welcome=1')
+    await submit(client, 'Send confirmation link')
+    await status(client, 'Check your email')
     const [user] = await db`select * from users where email=${email}`
     clientId = user.id
     assert.equal(user.role, 'client')
@@ -173,21 +206,22 @@ try {
     assert.equal(user.region_code, '30')
     assert.equal(user.based_in, 'Nairobi City, Kenya')
     assert.ok(user.consent_at)
-    assert.ok(user.password_hash.startsWith('scrypt$'))
+    assert.equal(user.password_hash, null)
     assert.equal(user.email_verified_at, null)
     const cookies = await clientContext.cookies()
-    assert.ok(cookies.find(c => c.name === 'av_session' && c.httpOnly && c.sameSite === 'Lax'))
+    assert.ok(!cookies.some(c => c.name === 'av_session'))
     verifyLink = await emailLink('Confirm your email for AngaVeritas', '/verify-email')
   })
   await check('verification scanners cannot consume links; confirmation is single-use', async () => {
     await client.goto(verifyLink)
     assert.equal((await db`select email_verified_at from users where id=${clientId}`)[0].email_verified_at, null)
-    await submit(client, 'Confirm my email')
-    await client.waitForURL(/\/portal\?verified=1/)
+    await fill(client, { password, confirm: password })
+    await submit(client, 'Confirm email and set password')
+    await client.waitForURL(origin + '/portal?welcome=1')
+    assert.ok((await clientContext.cookies()).some(c => c.name === 'av_session' && c.httpOnly && c.sameSite === 'Lax'))
     assert.ok((await db`select email_verified_at from users where id=${clientId}`)[0].email_verified_at)
     await client.goto(verifyLink)
-    await submit(client, 'Confirm my email')
-    await client.waitForURL(/status=invalid/)
+    await client.getByText('This link has expired or was already used.', { exact: false }).waitFor()
   })
   await check('read and update profile and notification preferences', async () => {
     await client.goto(origin + '/portal/account')
@@ -223,18 +257,18 @@ try {
     assert.equal(new URL(other.url()).pathname, '/login')
     assert.equal((await db`select count(*)::int n from sessions where user_id=${clientId}`)[0].n, 1)
   })
-  await check('logout removes the session; duplicate registration returns an inline error', async () => {
+  await check('logout removes the session; duplicate registration does not disclose the account', async () => {
     await submit(client, 'Sign out')
     await client.waitForURL(/\/login\?signed_out=1/)
     await client.goto(origin + '/register')
-    await fill(client, { fullName: 'Duplicate Client', email, phone: '+254700000001', password })
+    await fill(client, { fullName: 'Duplicate Client', email, phone: '+254700000001', whatsapp: '+447700900123' })
     await selectLocation(client, 'KE', '30')
     await client.locator('[name="consent"]').check()
-    await submit(client, 'Create account')
-    await alert(client, 'already exists')
+    await submit(client, 'Send confirmation link')
+    await status(client, 'Check your email')
   })
   let resetLink
-  await check('forgot password conceals existence and queues a working reset email', async () => {
+  await check('forgot password conceals existence and sends a working reset email', async () => {
     for (const address of ['absent@accounts.test.invalid', email]) {
       await client.goto(origin + '/forgot-password')
       await fill(client, { email: address })
@@ -256,8 +290,7 @@ try {
   })
   let staffId, inviteLink
   await check('admin reads accounts and invites staff; duplicate invite is rejected', async () => {
-    await login(admin, 'admin@accounts.test.invalid')
-    await admin.waitForURL(origin + '/staff')
+    await loginStaff(admin, 'admin@accounts.test.invalid')
     await admin.goto(origin + '/staff/team')
     await fill(admin, { fullName: 'Invited Analyst', email: 'analyst@accounts.test.invalid' })
     await admin.locator('form').filter({ has: admin.locator('[name="email"]') }).locator('[name="role"]').selectOption('analyst')
@@ -275,8 +308,9 @@ try {
   await check('staff accepts invitation and has the correct workspace', async () => {
     await staff.goto(inviteLink)
     await fill(staff, { password, confirm: password })
-    await submit(staff, 'Set password and continue')
-    await staff.waitForURL(origin + '/staff')
+    await submit(staff, 'Save new password')
+    await staff.waitForURL(/\/login\?password_set=1/)
+    await loginStaff(staff, 'analyst@accounts.test.invalid')
     assert.ok((await db`select email_verified_at from users where id=${staffId}`)[0].email_verified_at)
   })
   await check('admin can change roles and disable/re-enable accounts, revoking sessions and tokens', async () => {
@@ -298,8 +332,7 @@ try {
     await row.getByRole('button', { name: 'Disable', exact: true }).waitFor()
     await staff.goto(origin + '/reset-password?token=' + pending)
     await staff.getByText('This link has expired or was already used.', { exact: false }).waitFor()
-    await login(staff, 'analyst@accounts.test.invalid')
-    await staff.waitForURL(origin + '/staff')
+    await loginStaff(staff, 'analyst@accounts.test.invalid')
     await admin.goto(origin + '/staff/clients')
     await admin.getByRole('row').filter({ hasText: email }).waitFor()
     assert.ok(adminUser.id)
@@ -319,16 +352,24 @@ try {
   })
   await check('calculator can create an account and submit a custom request', async () => {
     const context = await browser.newContext()
+    const brief = { title: 'Account integration check', description: 'Verify the account and request submission pathway.' }
     const response = await context.request.post(origin + '/api/requests', {
       headers: { Origin: origin },
-      data: { kind: 'custom', location: null, brief: { title: 'Account integration check', description: 'Verify the account and request submission pathway.' },
-        account: { mode: 'register', fullName: 'Calculator Client', email: 'calculator@accounts.test.invalid', phone: '+254700000003', countryCode: 'KE', regionCode: '30', password, consent: true } },
+      data: { kind: 'custom', location: null, brief,
+        account: { mode: 'register', fullName: 'Calculator Client', email: 'calculator@accounts.test.invalid', phone: '+254700000003', whatsapp: '+254700000003', countryCode: 'KE', regionCode: '30', consent: true } },
     })
     const body = await response.json()
-    assert.equal(response.status(), 201, JSON.stringify(body))
-    assert.ok(body.ok)
+    assert.equal(response.status(), 202, JSON.stringify(body))
+    assert.ok(body.verificationRequired)
     const page = await context.newPage()
-    await page.goto(origin + body.url)
+    await page.goto(await emailLink('Confirm your email for AngaVeritas', '/verify-email', 'calculator@accounts.test.invalid'))
+    await fill(page, { password, confirm: password })
+    await submit(page, 'Confirm email and set password')
+    await page.waitForURL(origin + '/portal?welcome=1')
+    const sent = await context.request.post(origin + '/api/requests', { headers: { Origin: origin }, data: { kind: 'custom', location: null, brief } })
+    const submitted = await sent.json()
+    assert.equal(sent.status(), 201, JSON.stringify(submitted))
+    await page.goto(origin + submitted.url)
     await page.getByRole('heading', { name: 'Account integration check', exact: true }).waitFor()
   })
   await check('repeated incorrect passwords trigger the login limit', async () => {

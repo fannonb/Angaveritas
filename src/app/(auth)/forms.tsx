@@ -5,7 +5,7 @@ import { useActionState, useEffect, useState } from 'react'
 import { preserveForm, useFormDraft } from '@/components/app/useFormDraft'
 import PhoneNumberField from '@/components/app/PhoneNumberField'
 import LocationFields from '@/components/app/LocationFields'
-import { forgotPasswordAction, loginAction, registerAction, setPasswordAction, type FormState } from './actions'
+import { enrollStaffMfaAction, finishStaffSignInAction, forgotPasswordAction, loginAction, registerAction, setPasswordAction, type FormState } from './actions'
 
 function Submit({ children, pendingText, pending }: { children: React.ReactNode; pendingText: string; pending: boolean }) {
   return (
@@ -45,10 +45,11 @@ export function LoginForm({ next }: { next?: string }) {
 
 export function RegisterForm({ next }: { next?: string }) {
   const [state, action, pending] = useActionState<FormState, FormData>(registerAction, null)
-  const field = useFormDraft({ fullName: '', email: '', password: '' })
+  const field = useFormDraft({ fullName: '', email: '' })
   const [consent, setConsent] = useState(false)
   const [tz, setTz] = useState('')
   useEffect(() => setTz(Intl.DateTimeFormat().resolvedOptions().timeZone ?? ''), [])
+  if (state?.ok) return <p role="status" className="alert alert-ok">{state.message}</p>
   return (
     <form action={action} onSubmit={preserveForm(action)} className="space-y-4">
       <input type="hidden" name="next" value={next ?? ''} />
@@ -64,11 +65,6 @@ export function RegisterForm({ next }: { next?: string }) {
       <PhoneNumberField name="phone" label="Phone number" required />
       <PhoneNumberField name="whatsapp" label="WhatsApp number" required />
       <LocationFields />
-      <label className="label">
-        Password
-        <input className="input" name="password" {...field('password')} type="password" autoComplete="new-password" required minLength={10} maxLength={200} />
-        <span className="hint block">At least 10 characters.</span>
-      </label>
       <label className="check">
         <input type="checkbox" name="consent" checked={consent} onChange={event => setConsent(event.currentTarget.checked)} required />
         <span>
@@ -77,7 +73,7 @@ export function RegisterForm({ next }: { next?: string }) {
         </span>
       </label>
       <ErrorBox state={state} />
-      <Submit pending={pending} pendingText="Creating your account…">Create account</Submit>
+      <Submit pending={pending} pendingText="Sending…">Send confirmation link</Submit>
     </form>
   )
 }
@@ -98,13 +94,14 @@ export function ForgotForm() {
   )
 }
 
-export function SetPasswordForm({ token, purpose }: { token: string; purpose: 'invite' | 'reset_password' }) {
+export function SetPasswordForm({ token, purpose, next }: { token: string; purpose: 'invite' | 'reset_password' | 'verify_email'; next?: string }) {
   const [state, action, pending] = useActionState<FormState, FormData>(setPasswordAction, null)
   const field = useFormDraft({ password: '', confirm: '' })
   return (
     <form action={action} onSubmit={preserveForm(action)} className="space-y-4">
       <input type="hidden" name="token" value={token} />
       <input type="hidden" name="purpose" value={purpose} />
+      <input type="hidden" name="next" value={next ?? ''} />
       <label className="label">
         New password
         <input className="input" name="password" {...field('password')} type="password" autoComplete="new-password" required minLength={10} maxLength={200} autoFocus />
@@ -115,7 +112,26 @@ export function SetPasswordForm({ token, purpose }: { token: string; purpose: 'i
         <input className="input" name="confirm" {...field('confirm')} type="password" autoComplete="new-password" required minLength={10} maxLength={200} />
       </label>
       <ErrorBox state={state} />
-      <Submit pending={pending} pendingText="Saving…">{purpose === 'invite' ? 'Set password and continue' : 'Save new password'}</Submit>
+      <Submit pending={pending} pendingText="Saving…">{purpose === 'verify_email' ? 'Confirm email and set password' : 'Save new password'}</Submit>
+    </form>
+  )
+}
+
+export function StaffSecurityForm({ token, next }: { token?: string; next?: string }) {
+  const [state, action, pending] = useActionState<FormState, FormData>(token ? enrollStaffMfaAction : finishStaffSignInAction, null)
+  return (
+    <form action={action} className="space-y-4">
+      {token && <>
+        <input type="hidden" name="token" value={token} />
+        <label className="label">Password<input className="input" name="password" type="password" autoComplete="current-password" required maxLength={200} /></label>
+      </>}
+      <input type="hidden" name="next" value={next ?? ''} />
+      <label className="label">
+        Authenticator code
+        <input className="input" name="code" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} required autoFocus={!token} />
+      </label>
+      <ErrorBox state={state} />
+      <Submit pending={pending} pendingText="Checking…">{token ? 'Save authenticator' : 'Sign in'}</Submit>
     </form>
   )
 }

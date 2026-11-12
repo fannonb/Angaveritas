@@ -135,7 +135,6 @@ export default async function Dashboard({ searchParams: searchParamsPromise }: {
         </p>
       )}
       {searchParams.verified && <p className="alert alert-ok">Thank you, your email address is confirmed.</p>}
-      {searchParams.verification_sent && <p className="alert alert-ok">We sent a new confirmation link to {user.email}.</p>}
 
       {updates.length > 0 && (
         <section className="panel" aria-labelledby="updates">

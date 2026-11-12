@@ -2,7 +2,9 @@ import { logEvent, notifyTeam } from '@/lib/activity'
 import { getUser } from '@/lib/auth/session'
 import { completeFile, getFile, uploadWriteProblem } from '@/lib/data/files'
 import { projectFor } from '@/lib/data/projects'
-import { json, sameOrigin } from '@/lib/request'
+import { json, rateLimited, sameOrigin } from '@/lib/request'
+
+export const maxDuration = 60
 
 // Step 3: the bytes are stored. Hash them, read photo metadata, flag anything
 // that needs a manual check, and record it in the project history.
@@ -18,14 +20,16 @@ export async function POST(req: Request, { params: paramsPromise }: { params: Pr
   const problem = await uploadWriteProblem(user, pending)
   if (problem) return json({ error: problem }, 409)
   if (pending.status === 'ready') return json({ ok: true, file: pending })
+  if (await rateLimited(`upload-complete:${user.id}`,60,60_000)) return json({ error: 'Too many attempts. Try again in a minute.' },429)
 
-  let file
+  let result
   try {
-    file = await completeFile(pending.id)
+    result = await completeFile(pending.id)
   } catch (err) {
     return json({ error: err instanceof Error ? err.message : 'Upload failed.' }, 400)
   }
-  if (!file?.project_id) return json({ ok: true, file })
+  const { file, finalized } = result
+  if (!file.project_id || !finalized) return json({ ok: true, file: { id: file.id, evidence_code: file.evidence_code, integrity_flag: file.integrity_flag } })
 
   const access = await projectFor(user, file.project_id)
   if (file.category === 'client_document') {

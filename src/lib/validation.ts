@@ -47,7 +47,6 @@ export const registerSchema = z.object({
   whatsapp: requiredWhatsappSchema,
   ...locationFields,
   timezone: z.string().max(60).optional(),
-  password: z.string().min(1, 'Please choose a password.').max(200),
   consent: z.literal(true, { error: 'Please accept the Privacy Policy and Terms to create an account.' }),
 }).superRefine(validateLocation)
 

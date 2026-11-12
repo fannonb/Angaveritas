@@ -2,9 +2,10 @@
 
 import { notifyTeam } from '@/lib/activity'
 import { getUser, requestIpHash } from '@/lib/auth/session'
-import { createEnquiry, recentEnquiriesForEmail, recentEnquiriesFromIp } from '@/lib/data/misc'
+import { createEnquiry } from '@/lib/data/misc'
 import { sendEmail } from '@/lib/email'
 import { enquirySchema } from '@/lib/validation'
+import { hashIp, rateLimited } from '@/lib/request'
 
 // On failure the submitted values come back so the form can be refilled, with one message per field.
 export type EnquiryState = { ok?: boolean; error?: string; fields?: Record<string, string>; values?: Record<string, string> } | null
@@ -24,9 +25,10 @@ export async function sendEnquiry(_: EnquiryState, form: FormData): Promise<Enqu
   const e = parsed.data
   if (e.website) return { ok: true } // bot
   const ipHash = await requestIpHash()
-  if ((await recentEnquiriesFromIp(ipHash)) >= 5) return { error: 'Too many messages from your connection. Please email us instead.', values }
+  if (await rateLimited(`enquiries:${ipHash}`, 5, 3_600_000) || await rateLimited('enquiries:global', 100, 3_600_000)) {
+    return { error: 'Too many messages. Please try again later or email us.', values }
+  }
   const user = await getUser()
-  const earlier = await recentEnquiriesForEmail(e.email)
   await createEnquiry({ ...e, userId: user?.id ?? null, ipHash })
   await notifyTeam({
     title: `Website enquiry from ${e.name}`,
@@ -42,7 +44,7 @@ export async function sendEnquiry(_: EnquiryState, form: FormData): Promise<Enqu
   })
   // The address is unverified, so the acknowledgement carries none of the visitor's words (name or message)
   // and goes out at most once a day per address: the form cannot send someone else's text from our domain.
-  if (!earlier) {
+  if (!(await rateLimited(`enquiry-ack:${hashIp(e.email)}`, 1, 86_400_000))) {
     await sendEmail({
       to: e.email,
       subject: 'We have received your enquiry',

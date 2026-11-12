@@ -6,6 +6,7 @@ export async function GET(req: Request) {
   const q = new URL(req.url).searchParams.get('q')?.trim() ?? ''
   if (q.length < 3 || q.length > 120) return json({ places: [] })
   if (await rateLimited(`places:${hashIp(clientIp(req))}`, 60, 60_000)) return json({ error: 'Too many searches. Please wait a minute.' }, 429)
+  if (await rateLimited('geocoding:global', 300, 60_000)) return json({ error: 'Place lookup is busy. Please try again in a minute.' }, 429)
 
   const coords = parseCoordinates(q)
   if (coords && !inKenya(coords.lat, coords.lng)) {

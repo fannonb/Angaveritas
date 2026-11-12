@@ -30,7 +30,7 @@ export async function acceptProposalAction(_: ActionState, form: FormData): Prom
   if (name.length < 2) return { error: 'Type your full name to sign.' }
   if (name.toLowerCase().replace(/\s+/g, ' ') !== user.full_name.toLowerCase().replace(/\s+/g, ' '))
     return { error: `Type your name exactly as on your account (${user.full_name}). To change it, update your account first.` }
-  if (!user.email_verified_at) return { error: 'Please confirm your email address first. Use “Resend email” at the top of the page.' }
+  if (!user.email_verified_at) return { error: 'Please confirm your email address before accepting the proposal.' }
   const p = await getProposal(id)
   if (!p) return { error: 'Proposal not found.' }
 

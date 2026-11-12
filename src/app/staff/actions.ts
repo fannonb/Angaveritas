@@ -31,7 +31,7 @@ import { createReport, getReport, setReportStatus, updateReport, publishReport, 
 import { fieldCollectionProblem, fieldworkProblem, requestTransitionAllowed, projectTransitionProblem } from '@/lib/workflow'
 import { getRequestById, setRequestStatus, updateQualification } from '@/lib/data/requests'
 import { countAdmins, createStaffAccount, findUserByEmail, getUserById, setDisabled, setStaffRole } from '@/lib/data/users'
-import { appUrl, sendEmail } from '@/lib/email'
+import { sendAuthEmail } from '@/lib/email'
 import {
   confidenceLabels,
   healthLabels,
@@ -76,7 +76,7 @@ function refreshProject(code: string) {
 
 export async function requestStatusAction(form: FormData) {
   const user = await requireStaff(managers)
-  const r = await getRequestById(str(form, 'requestId'))
+  const r = await getRequestById(str(form, 'requestId'), user.role === 'analyst' ? user.id : undefined)
   const status = str(form, 'status') as RequestStatus
   if (!r || !(status in requestStatusLabels) || r.status === status) return
   if (!requestTransitionAllowed(r.status, status)) return
@@ -93,7 +93,7 @@ export async function requestStatusAction(form: FormData) {
 /** Lets an analyst or admin take a request in one step. Taking a new request also starts its review, so the client hears someone is on it. */
 export async function claimRequestAction(form: FormData) {
   const user = await requireStaff(managers)
-  const r = await getRequestById(str(form, 'requestId'))
+  const r = await getRequestById(str(form, 'requestId'), user.role === 'analyst' ? user.id : undefined)
   if (!r) return
   if (r.owner_id !== user.id) {
     await updateQualification(r.id, { priority: r.priority, ownerId: user.id })
@@ -110,7 +110,7 @@ export async function claimRequestAction(form: FormData) {
 
 export async function qualifyAction(form: FormData) {
   const user = await requireStaff(managers)
-  const r = await getRequestById(str(form, 'requestId'))
+  const r = await getRequestById(str(form, 'requestId'), user.role === 'analyst' ? user.id : undefined)
   if (!r) return
   const priority = ['high', 'normal', 'low'].includes(str(form, 'priority')) ? (str(form, 'priority') as 'high') : null
   const ownerId = /^[0-9a-f-]{36}$/.test(str(form, 'ownerId')) ? str(form, 'ownerId') : null
@@ -137,7 +137,7 @@ function lineItemsFromForm(form: FormData): LineItem[] {
 
 export async function saveProposalAction(_: StaffState, form: FormData): Promise<StaffState> {
   const user = await requireStaff(managers)
-  const r = await getRequestById(str(form, 'requestId'))
+  const r = await getRequestById(str(form, 'requestId'), user.role === 'analyst' ? user.id : undefined)
   if (!r) return { error: 'Request not found.' }
   if (!['submitted','in_review','proposal_sent','declined'].includes(r.status)) return {error:'This request is no longer open for proposals. Create follow-up work instead.'}
   const items = lineItemsFromForm(form)
@@ -203,12 +203,13 @@ export async function saveProposalAction(_: StaffState, form: FormData): Promise
 }
 
 export async function deleteDraftAction(form: FormData) {
-  await requireStaff(managers)
+  const user = await requireStaff(managers)
   const p = await getProposal(str(form, 'proposalId'))
   if (!p) return
+  const r = await getRequestById(p.request_id, user.role === 'analyst' ? user.id : undefined)
+  if (!r) return
   await deleteDraft(p.id)
-  const r = await getRequestById(p.request_id)
-  revalidatePath(`/staff/requests/${r?.reference}`)
+  revalidatePath(`/staff/requests/${r.reference}`)
 }
 
 // =====================================================================
@@ -229,7 +230,7 @@ export async function staffMessageAction(form: FormData) {
     if (!internal) await notifyUser(access.project.client_id, { title: `New message about ${access.project.title}`, body, href: `/portal/projects/${access.project.code}?tab=messages` })
     refreshProject(access.project.code)
   } else if (requestId) {
-    const r = await getRequestById(requestId)
+    const r = await getRequestById(requestId, user.role === 'analyst' ? user.id : undefined)
     if (!r) return
     await postMessage({ requestId }, user.id, body, internal)
     if (!internal) await notifyUser(r.client_id, { title: `New message about ${r.title}`, body, href: `/portal/requests/${r.reference}#messages` })
@@ -871,23 +872,20 @@ export async function inviteStaffAction(_: StaffState, form: FormData): Promise<
   if (existing) return { error: existing.role === 'client' ? 'That email belongs to a client account.' : 'That person already has a staff account.' }
   const id = await createStaffAccount({ email: email.data, fullName, role, phone: formText(form, 'phone', 40) })
   if (!id) return { error: 'An account with that email already exists. Refresh the team list.' }
-  await sendInvite(id, email.data, fullName, admin.full_name)
+  const sent = await sendInvite(id, email.data)
   await logEvent({ actorId: admin.id, type: 'team.invited', summary: `${fullName} invited as ${role}`, ipHash: await requestIpHash() })
   revalidatePath('/staff/team')
-  return { ok: true, message: `Invitation sent to ${email.data}.` }
+  return { ok: true, message: sent ? `Invitation sent to ${email.data}.` : 'The account was created. Use Resend invite to try delivery again.' }
 }
 
-async function sendInvite(userId: string, email: string, name: string, from: string) {
-  const token = await issueToken(userId, 'invite')
-  await sendEmail({
+async function sendInvite(userId: string, email: string) {
+  const token = await issueToken(userId, 'invite', true)
+  if (!token) return false
+  return sendAuthEmail({
     to: email,
     subject: 'Your AngaVeritas staff account',
-    text: [
-      `Hello ${name.split(' ')[0]},`,
-      '',
-      `${from} has invited you to the AngaVeritas workspace. Choose your password here (the link works for 7 days):`,
-      `${appUrl()}/invite?token=${token}`,
-    ].join('\n'),
+    text: 'You have been invited to the AngaVeritas workspace. Set your password using this link within seven days.',
+    actionPath: `/invite?token=${token}`,
   })
 }
 
@@ -895,7 +893,7 @@ export async function resendInviteAction(form: FormData) {
   const admin = await requireStaff(['admin'])
   const u = await getUserById(str(form, 'userId'))
   if (!u || u.role === 'client' || u.password_hash || u.disabled_at) return
-  await sendInvite(u.id, u.email, u.full_name, admin.full_name)
+  await sendInvite(u.id, u.email)
   revalidatePath('/staff/team')
 }
 
@@ -995,7 +993,7 @@ export async function publicPricesAction(form: FormData) {
 export async function dismissReplyAction(form: FormData) {
   const user = await requireStaff(managers)
   const thread = str(form, 'thread')
-  const waiting = (await threadsAwaitingReply()).find((t) => t.thread === thread)
+  const waiting = (await threadsAwaitingReply(user.role === 'analyst' ? user.id : undefined)).find((t) => t.thread === thread)
   if (!waiting) return
   await dismissReply(thread, waiting.last_at, user.id)
   await logEvent({ actorId: user.id, projectId: waiting.project_id, requestId: waiting.request_id, type: 'message.no_reply', summary: `Marked "${waiting.label}" as needing no reply` })

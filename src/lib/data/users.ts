@@ -2,6 +2,7 @@ import 'server-only'
 import { sql } from '@/lib/db'
 import type { Role } from '@/lib/labels'
 import { formatLocation } from '@/lib/location'
+import { analystProjectScope, analystRequestScope } from './projects'
 
 export type UserRow = {
   id: string
@@ -32,7 +33,7 @@ export async function getUserById(id: string) {
   return row ?? null
 }
 
-export async function createClientAccount(u: { email: string; passwordHash: string; fullName: string; phone: string; whatsapp?: string | null; countryCode: string; regionCode: string; timezone?: string }) {
+export async function createClientAccount(u: { email: string; passwordHash: string | null; fullName: string; phone: string; whatsapp?: string | null; countryCode: string; regionCode: string; timezone?: string }) {
   const [row] = await sql<{ id: string }[]>`
     insert into users (email, password_hash, full_name, phone, whatsapp, based_in, country_code, region_code, timezone, role, consent_at)
     values (${u.email.trim().toLowerCase()}, ${u.passwordHash}, ${u.fullName}, ${u.phone}, ${u.whatsapp ?? null}, ${formatLocation(u.countryCode, u.regionCode)}, ${u.countryCode}, ${u.regionCode},
@@ -56,10 +57,6 @@ export async function setPassword(userId: string, passwordHash: string) {
     await tx`update users set password_hash = ${passwordHash} where id = ${userId} and disabled_at is null`
     await tx`update user_tokens set used_at=now() where user_id=${userId} and used_at is null`
   })
-}
-
-export async function markEmailVerified(userId: string) {
-  await sql`update users set email_verified_at = coalesce(email_verified_at, now()) where id = ${userId}`
 }
 
 export async function updateProfile(userId: string, p: { fullName: string; phone: string | null; whatsapp?: string | null; countryCode: string; regionCode: string; timezone: string }) {
@@ -110,15 +107,25 @@ export async function setDisabled(userId: string, disabled: boolean) {
   })
 }
 
-export async function listClients(search?: string) {
+function analystClientScope(analystId: string) {
+  return sql`(exists (select 1 from projects p where p.client_id=u.id and ${analystProjectScope(analystId)})
+    or exists (select 1 from requests r where r.client_id=u.id and ${analystRequestScope(analystId)}))`
+}
+
+export async function analystCanReadClient(clientId: string, analystId: string) {
+  return (await sql`select 1 from users u where u.id=${clientId} and u.role='client' and ${analystClientScope(analystId)}`).length > 0
+}
+
+export async function listClients(search?: string, analystId?: string) {
   const q = search?.trim() ? `%${search.trim().replace(/[%_]/g, '')}%` : null
   return sql<(UserRow & { requests: number; projects: number; active_projects: number })[]>`
     select u.*,
-      (select count(*)::int from requests r where r.client_id = u.id) as requests,
-      (select count(*)::int from projects p where p.client_id = u.id) as projects,
-      (select count(*)::int from projects p where p.client_id = u.id and p.stage <> 'closed') as active_projects
+      (select count(*)::int from requests r where r.client_id = u.id and ${analystId ? analystRequestScope(analystId) : sql`true`}) as requests,
+      (select count(*)::int from projects p where p.client_id = u.id and ${analystId ? analystProjectScope(analystId) : sql`true`}) as projects,
+      (select count(*)::int from projects p where p.client_id = u.id and p.stage <> 'closed' and ${analystId ? analystProjectScope(analystId) : sql`true`}) as active_projects
     from users u
     where u.role = 'client'
+      and ${analystId ? analystClientScope(analystId) : sql`true`}
       and ${q ? sql`(u.full_name ilike ${q} or u.email ilike ${q} or u.phone ilike ${q} or u.whatsapp ilike ${q})` : sql`true`}
     order by u.created_at desc
     limit 300`

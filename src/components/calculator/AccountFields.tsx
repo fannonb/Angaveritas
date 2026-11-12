@@ -3,10 +3,10 @@ import PhoneNumberField from '@/components/app/PhoneNumberField'
 import LocationFields from '@/components/app/LocationFields'
 
 export type Account =
-  | { mode: 'register'; fullName: string; email: string; phone: string; whatsapp: string; countryCode: string; regionCode: string; password: string; consent: boolean }
+  | { mode: 'register'; fullName: string; email: string; phone: string; whatsapp: string; countryCode: string; regionCode: string; consent: boolean }
   | { mode: 'login'; email: string; password: string }
 
-export const emptyRegister: Account = { mode: 'register', fullName: '', email: '', phone: '', whatsapp: '', countryCode: '', regionCode: '', password: '', consent: false }
+export const emptyRegister: Account = { mode: 'register', fullName: '', email: '', phone: '', whatsapp: '', countryCode: '', regionCode: '', consent: false }
 
 // Shown at the end of the calculator to visitors who aren't signed in:
 // the request is saved to their account so they can follow it from the dashboard.
@@ -29,7 +29,7 @@ export default function AccountFields({ value, onChange }: { value: Account; onC
       </div>
       <p className="hint -mt-2">
         {value.mode === 'register'
-          ? 'Your account is where you receive the proposal, track the work, and see evidence and reports.'
+          ? 'We’ll email you a link to confirm your address and choose a password before you submit.'
           : 'Sign in and we will add this request to your account.'}
       </p>
 
@@ -46,11 +46,6 @@ export default function AccountFields({ value, onChange }: { value: Account; onC
           <PhoneNumberField name="phone" label="Phone number" required initialValue={value.phone} onValueChange={phone => onChange({ ...value, phone })} />
           <PhoneNumberField name="whatsapp" label="WhatsApp number" initialValue={value.whatsapp} onValueChange={whatsapp => onChange({ ...value, whatsapp })} />
           <div className="sm:col-span-2"><LocationFields initialCountry={value.countryCode} initialRegion={value.regionCode} onValueChange={location => onChange({ ...value, ...location })} /></div>
-          <label className="label sm:col-span-2">
-            Password
-            <input className="input" type="password" autoComplete="new-password" required minLength={10} maxLength={200} value={value.password} onChange={set('password')} />
-            <span className="hint block">At least 10 characters.</span>
-          </label>
           <label className="check sm:col-span-2">
             <input type="checkbox" checked={value.consent} onChange={set('consent')} />
             <span>

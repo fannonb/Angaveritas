@@ -13,11 +13,18 @@ describe('branded email template', () => {
     expect(html).toContain('Please confirm your address.')
   })
 
-  it('turns an Open link into a button and keeps plain links clickable', () => {
-    const html = renderEmailHtml('New message', 'Your analyst replied.\n\nOpen: https://angaveritas.com/portal/projects/AVP-103\n\nSee https://angaveritas.com/sample-report', opts)
+  it('renders only the separate same-origin action as a link', () => {
+    const html = renderEmailHtml('New message', 'Your analyst replied.\n\nOpen: https://external.invalid/fake', { ...opts, actionPath: '/portal/projects/AVP-103' })
     expect(html).toContain('href="https://angaveritas.com/portal/projects/AVP-103"')
-    expect(html).toContain('Open in AngaVeritas')
-    expect(html).toContain('href="https://angaveritas.com/sample-report"')
+    expect(html.match(/Open in AngaVeritas/g)).toHaveLength(1)
+    expect(html).not.toContain('href="https://external.invalid/fake"')
+    expect(html).toContain('Open: https://external.invalid/fake')
+  })
+
+  it('rejects off-origin, protocol-relative and control-character action paths', () => {
+    for (const actionPath of ['https://external.invalid/', '//external.invalid/', '/\t/external.invalid/']) {
+      expect(renderEmailHtml('Message', 'Body', { ...opts, actionPath })).not.toContain('Open in AngaVeritas')
+    }
   })
 
   it('escapes user-supplied text', () => {

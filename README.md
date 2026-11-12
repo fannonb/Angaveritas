@@ -49,7 +49,7 @@ See `docs/IMPLEMENTATION_STATUS.md` for completed work, integration boundaries a
 
 Vercel Cron calls `/api/jobs` daily (see `vercel.json`; set `CRON_SECRET`). For more frequent email retries, also schedule `POST /api/jobs` with `Authorization: Bearer <WORKER_SECRET>`. Set `WORKER_USER_ID` to a dedicated active admin if the worker should also generate monitoring invoices. Do not put worker secrets in browser code or URLs. Jobs do not dispatch field teams or process real payments.
 
-`NEXT_PUBLIC_BOOKING_URL` and `NEXT_PUBLIC_WHATSAPP` enable the existing contact paths. `FILE_SCAN_URL` accepts an authenticated raw-byte POST and must respond with `{ "clean": true }`; `FILE_SCAN_KEY` supplies its Bearer credential.
+`NEXT_PUBLIC_BOOKING_URL` and `NEXT_PUBLIC_WHATSAPP` enable the existing contact paths. Production client document uploads require `FILE_SCAN_URL`, which accepts a raw-byte POST and returns `{ "clean": true }` for approved files. Set `FILE_SCAN_KEY` if the scanner requires a bearer token.
 
 Paystack hosted checkout supports KES deposits and balances with signed webhooks, server verification, transactional reconciliation and dashboard-initiated refund synchronization. Configure the merchant account, payment audit identity, webhook and scheduled worker before enabling checkout. See `docs/PAYSTACK.md` for setup and live validation. The manual billing ledger remains available.
 
@@ -81,15 +81,15 @@ Requirements: Node 20.19+ (or a newer supported release), PostgreSQL 13+.
 
 ```bash
 npm install
-cp .env.example .env.local      # set DATABASE_URL and SESSION_SECRET
+cp .env.example .env.local      # set local DATABASE_URL and generate STAFF_MFA_KEY
 npm run db:migrate
 npm run user:add -- you@angaveritas.com "Your Name" admin   # prints a link to set your password
 npm run dev                      # http://localhost:3000
 npm test                         # pricing engine tests
 ```
 
-Without `RESEND_API_KEY`, emails (verification, password reset, invitations, notifications) are printed to the
-terminal running `npm run dev`, so you can click the links there.
+In development, when `RESEND_API_KEY` is empty, open account links from the terminal running `npm run dev`. Staff
+use the enrollment link on their first sign-in, then sign in with a password and an authenticator code.
 
 On this computer the database is the standalone PostgreSQL cluster in `D:\tmp\av-pgdata` on port 5499. Start it after a reboot:
 
@@ -104,8 +104,8 @@ The site needs Node hosting now; plain cPanel/PHP hosting no longer works.
 1. **Supabase**: create a project. Run `npm run db:migrate` with `DATABASE_URL` set to the **Transaction pooler** string (port 6543).
    Files live in Cloudflare R2 (see step 2), so no Supabase storage bucket is needed.
 2. **Vercel**: import the repository and set:
-   - `DATABASE_URL`, `SESSION_SECRET` (long random string), `IP_HASH_SALT` (long random string), `APP_URL=https://angaveritas.com`
-   - Files: `STORAGE_DRIVER=r2`, `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` (the private bucket, e.g. `angaveritas`). Create the access key under R2 → Manage API Tokens; the secret is shown once.
+   - `DATABASE_URL` (dedicated runtime role over verified TLS), `STAFF_MFA_KEY` (32 random bytes in base64url), `IP_HASH_SALT` (long random string), `APP_URL=https://angaveritas.com`
+   - Files: `STORAGE_DRIVER=r2`, `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`, and `FILE_SCAN_URL`. Allow `If-None-Match` in the private R2 bucket's CORS configuration. See the [security rollout](docs/HANDOVER.md#security-rollout).
    - Email: `RESEND_API_KEY`, `EMAIL_FROM` (a verified sender such as `AngaVeritas <no-reply@angaveritas.com>`), `NOTIFY_EMAIL` (optional additional team inboxes, comma-separated). `info@angaveritas.com` always receives team alerts and separate copies of business updates, acknowledgements and invoices. Verification, password-reset and invitation links are not copied. Client emails reply to the shared inbox; enquiry and client-message alerts reply to the client. Admins are included in team alerts, subject to their email preferences.
 3. Point `angaveritas.com` at Vercel. Run `npm run user:add` once against production for the first admin.
 

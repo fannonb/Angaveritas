@@ -55,6 +55,7 @@ export default function Calculator({ config, usdRate, signedInAs, initialService
   const [account, setAccount] = useState<Account>(emptyRegister)
   const [honeypot, setHoneypot] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  const [verificationRequired, setVerificationRequired] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const restored = useRef(false)
   const panel = useRef<HTMLDivElement>(null)
@@ -140,6 +141,7 @@ export default function Calculator({ config, usdRate, signedInAs, initialService
 
   async function submit() {
     setError(null)
+    setVerificationRequired(false)
     if (brief.title.trim().length < 3) return setError('Please give the project a short name.')
     if (isCustom && brief.description.trim().length < 10) return setError('Please describe what you need checked.')
     if (!signedInAs && account.mode === 'register' && !account.consent) return setError('Please accept the Terms and Privacy Policy to create your account.')
@@ -162,6 +164,11 @@ export default function Calculator({ config, usdRate, signedInAs, initialService
       const res = await fetch('/api/requests', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
       const data = await res.json().catch(() => ({}))
       if (!res.ok) throw new Error(data.error || 'Something went wrong. Please try again.')
+      if (res.status === 202 && data.verificationRequired) {
+        setVerificationRequired(true)
+        setSubmitting(false)
+        return
+      }
       try {
         sessionStorage.removeItem(STORE_KEY)
       } catch {}
@@ -381,6 +388,12 @@ export default function Calculator({ config, usdRate, signedInAs, initialService
             </div>
 
             {error && <p role="alert" className="alert alert-bad mt-5">{error}</p>}
+            {verificationRequired && (
+              <div role="status" className="alert alert-ok mt-5">
+                <p>Check your email to finish creating your account. Your draft stays in this tab. After confirming your email, return here and refresh to submit it.</p>
+                <button type="button" className="linkish" onClick={() => window.location.reload()}>Refresh this tab</button>
+              </div>
+            )}
           </div>
 
           <div className="est-foot">
@@ -394,7 +407,7 @@ export default function Calculator({ config, usdRate, signedInAs, initialService
             <div className="flex flex-col items-end gap-1.5">
               {step === lastStep ? (
                 <button type="button" className="btn btn-primary" disabled={submitting} onClick={submit}>
-                  {submitting ? 'Sending…' : signedInAs ? 'Submit request' : account.mode === 'register' ? 'Create account and submit' : 'Sign in and submit'}
+                  {submitting ? 'Sending…' : signedInAs ? 'Submit request' : account.mode === 'register' ? 'Send confirmation link' : 'Sign in and submit'}
                 </button>
               ) : (
                 <button type="button" className="btn btn-primary" disabled={!canContinue} onClick={() => go(step + 1)}>
@@ -448,7 +461,7 @@ export default function Calculator({ config, usdRate, signedInAs, initialService
             <div className="est-next">
               <p className="kicker">What happens next</p>
               <ol>
-                <li>Send the request. It creates your free account.</li>
+                <li>Confirm your email if you need an account, then send the request.</li>
                 <li>An analyst reviews it and sends a formal proposal.</li>
                 <li>Work starts only when you accept it online.</li>
               </ol>

@@ -8,6 +8,7 @@ import { spawn } from 'node:child_process'
 import assert from 'node:assert/strict'
 import postgres from 'postgres'
 import { chromium } from 'playwright'
+import { seedTestAuthenticator } from './test-staff-auth.mjs'
 
 try { process.loadEnvFile('.env.local') } catch {}
 const url = new URL(process.env.DATABASE_URL)
@@ -22,6 +23,8 @@ url.searchParams.set('search_path', `${schema},public`)
 const db = postgres(url.toString(), { max: 3, onnotice() {} })
 const checks = [], errors = []
 const password = 'Account-check-2026!'
+const staffKey = crypto.randomBytes(32).toString('base64url')
+const staffCodes = new Map()
 let server, browser, log = ''
 async function check(name, work) { await work(); checks.push(name); console.log(`PASS ${name}`) }
 async function fill(page, values) {
@@ -42,6 +45,11 @@ async function login(page, account, pw = password) {
   await page.goto(origin + '/login')
   await fill(page, { email: account, password: pw })
   await submit(page, 'Sign in')
+  if (staffCodes.has(account)) {
+    await page.waitForURL(/\/staff-security\?next=/)
+    await fill(page, { code: staffCodes.get(account)() })
+    await submit(page, 'Sign in')
+  }
 }
 try {
   await control.unsafe(`create schema "${schema}"`)
@@ -52,12 +60,13 @@ try {
   const stored = `scrypt$16384$8$1$${salt.toString('base64')}$${hash.toString('base64')}`
   const [adminUser] = await db`insert into users(email,full_name,role,password_hash,email_verified_at)
     values ('admin@accounts.test.invalid','Account Admin','admin',${stored},now()) returning id`
+  staffCodes.set('admin@accounts.test.invalid', await seedTestAuthenticator(db, adminUser.id, staffKey))
   server = spawn(process.execPath, ['node_modules/next/dist/bin/next', process.env.BRIEF_TEST_PRODUCTION === '1' ? 'start' : 'dev', '-p', String(port)], {
     windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env, DATABASE_URL: url.toString(), NEXT_DIST_DIR: '.next-briefs', APP_URL: origin,
       STORAGE_DRIVER: 'local', STORAGE_DIR: path.join(results, 'storage'), RESEND_API_KEY: '', NOTIFY_EMAIL: 'team@accounts.test.invalid',
       PAYSTACK_SECRET_KEY: '', PAYSTACK_PUBLIC_KEY: '',
-      WORKER_SECRET: '', WORKER_USER_ID: '', IP_HASH_SALT: 'isolated-account-test' },
+      WORKER_SECRET: '', WORKER_USER_ID: '', IP_HASH_SALT: 'isolated-account-test', STAFF_MFA_KEY: staffKey },
   })
   const record = d => { log += d.toString(); fs.writeFileSync(path.join(results, 'server.log'), log) }
   server.stdout.on('data', record)
@@ -77,6 +86,7 @@ try {
   }
   const [owner] = await db`insert into users(email,full_name,role,password_hash,email_verified_at,country_code,region_code) values ('briefs@accounts.test.invalid','Brief Client','client',${stored},now(),'KE','30') returning id`
   const [agent] = await db`insert into users(email,full_name,role,password_hash,email_verified_at) values ('agent@accounts.test.invalid','Brief Agent','field_agent',${stored},now()) returning id`
+  staffCodes.set('agent@accounts.test.invalid', await seedTestAuthenticator(db, agent.id, staffKey))
   await login(client,'briefs@accounts.test.invalid')
   await client.waitForURL(origin+'/portal')
   await login(admin,'admin@accounts.test.invalid')

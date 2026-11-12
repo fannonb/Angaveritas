@@ -1,11 +1,14 @@
 // Real Chromium + Next.js + PostgreSQL workflow test. Uses only a disposable
 // schema and storage directory; the existing development app/data are untouched.
 import fs from 'node:fs'
+import crypto from 'node:crypto'
+import { createServer } from 'node:http'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import assert from 'node:assert/strict'
 import postgres from 'postgres'
 import { chromium } from 'playwright'
+import { seedTestAuthenticator } from './test-staff-auth.mjs'
 
 try { process.loadEnvFile('.env.local') } catch {}
 if (!['127.0.0.1','localhost','[::1]'].includes(new URL(process.env.DATABASE_URL).hostname)) throw new Error('Workflow tests require a local database')
@@ -16,7 +19,7 @@ const production = process.env.WORKFLOW_TEST_PRODUCTION === '1'
 const results = path.resolve('test-results', schema)
 fs.mkdirSync(results, { recursive: true })
 const source = postgres(process.env.DATABASE_URL, { max: 1, onnotice() {} })
-let db, server, browser
+let db, server, browser, scanner
 const checks = []
 const browserErrors = []
 let log = ''
@@ -30,6 +33,8 @@ const password = process.env.WORKFLOW_TEST_PASSWORD || fs.readFileSync('ACCESS.m
 if (!password) throw new Error('Set WORKFLOW_TEST_PASSWORD to the local demo account password.')
 const users = {}
 const pages = {}
+const staffKey = crypto.randomBytes(32).toString('base64url')
+const staffCodes = new Map()
 // Optional answers sit in collapsed sections; open the one around a field before filling it, as a person would.
 async function field(page, name, value) {
   const input = page.locator(`[name="${name}"]`)
@@ -65,17 +70,31 @@ try {
   for (const demo of demos) {
     await db`insert into users ${db(demo)}`
     users[demo.role] = demo
+    if (demo.role !== 'client') staffCodes.set(demo.role, await seedTestAuthenticator(db, demo.id, staffKey))
   }
   const [other] = await db`insert into users(email,full_name,password_hash,email_verified_at) values
     ('other-client@test.invalid','Other Client',${users.client.password_hash},now()) returning id`
   const [foreign] = await db`insert into projects(client_id,title) values (${other.id},'Private unrelated project') returning id,code`
   const [foreignFile] = await db`insert into files(project_id,category,media_type,filename,mime,size_bytes,storage_key,status,uploaded_by)
     values (${foreign.id},'client_document','document','private.txt','text/plain',7,'private','ready',${other.id}) returning id`
+  scanner = createServer((request, response) => {
+    request.resume()
+    request.once('end', () => {
+      response.setHeader('Content-Type', 'application/json')
+      response.end(JSON.stringify({ clean: true }))
+    })
+  })
+  await new Promise((resolve, reject) => {
+    scanner.once('error', reject)
+    scanner.listen(0, '127.0.0.1', resolve)
+  })
+  const scannerUrl = `http://127.0.0.1:${scanner.address().port}/scan`
   server = spawn(process.execPath, ['node_modules/next/dist/bin/next', production ? 'start' : 'dev', '-p', String(port)], {
     cwd: process.cwd(), windowsHide: true,
     env: { ...process.env, DATABASE_URL: url.toString(), NEXT_DIST_DIR: process.env.WORKFLOW_TEST_DIST_DIR || (production ? '.next-production' : '.next-workflow'), APP_URL: origin,
       STORAGE_DRIVER: 'local', STORAGE_DIR: path.join(results, 'storage'), RESEND_API_KEY: '',
-      NOTIFY_EMAIL: 'team@test.invalid', FILE_SCAN_URL: '', WORKER_SECRET: '', WORKER_USER_ID: '' },
+      NOTIFY_EMAIL: 'team@test.invalid', FILE_SCAN_URL: scannerUrl, FILE_SCAN_KEY: '',
+      WORKER_SECRET: '', WORKER_USER_ID: '', STAFF_MFA_KEY: staffKey },
     stdio: ['ignore','pipe','pipe'],
   })
   server.stdout.on('data', data => { log += data.toString() })
@@ -97,6 +116,11 @@ try {
       await field(page, 'email', users[role].email)
       await field(page, 'password', password)
       await click(page, 'Sign in')
+      if (staffCodes.has(role)) {
+        await page.waitForURL(/\/staff-security\?next=/)
+        await field(page, 'code', staffCodes.get(role)())
+        await click(page, 'Sign in')
+      }
       await page.waitForURL(origin + (role === 'client' ? '/portal' : '/staff'))
       assert.equal(new URL(page.url()).pathname, role === 'client' ? '/portal' : '/staff')
       await shot(page, `${role}-dashboard`)
@@ -504,6 +528,7 @@ try {
   fs.writeFileSync(path.join(results,'server.log'),log)
   if(browser) await browser.close()
   if(server) { server.kill(); await new Promise(resolve=>server.exitCode!==null ? resolve() : server.once('exit',resolve)) }
+  if(scanner?.listening) await new Promise(resolve => scanner.close(resolve))
   if(db) await db.end()
   await source.unsafe(`drop schema if exists "${schema}" cascade`)
   await source.end()

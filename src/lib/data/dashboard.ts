@@ -1,6 +1,7 @@
 import 'server-only'
 import { sql } from '@/lib/db'
 import type { Health } from '@/lib/labels'
+import { analystProjectScope } from './projects'
 
 export async function clientStats(clientId: string) {
   const [row] = await sql<{ active: number; on_track: number; assessed: number; alerts: number; inspections_month: number; next_visit: string | null; reports: number }[]>`
@@ -118,10 +119,12 @@ export async function projectHealthCounts() {
   return Object.fromEntries(rows.map((r) => [r.health, r.n])) as Partial<Record<Health, number>>
 }
 
-export async function upcomingInspections(agentId?: string) {
+export async function upcomingInspections(agentId?: string, analystId?: string) {
   return sql<{ id: string; code: string; title: string; status: string; scheduled_for: string | null; agent_name: string | null; project_code: string; project_title: string; location_label: string | null }[]>`
     select i.id, i.code, i.title, i.status, i.scheduled_for::text, a.full_name as agent_name, p.code as project_code, p.title as project_title, p.location_label
     from inspections i join projects p on p.id = i.project_id left join users a on a.id = i.agent_id
-    where i.status in ('scheduled', 'in_progress') ${agentId ? sql`and i.agent_id = ${agentId}` : sql``}
+    where i.status in ('scheduled', 'in_progress')
+      and ${agentId ? sql`(i.agent_id=${agentId} or (i.agent_id is null and p.field_agent_id=${agentId}))` : sql`true`}
+      and ${analystId ? analystProjectScope(analystId) : sql`true`}
     order by i.scheduled_for nulls last limit 20`
 }

@@ -6,6 +6,7 @@ import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import postgres from 'postgres'
 import { chromium } from 'playwright'
+import { seedTestAuthenticator } from './test-staff-auth.mjs'
 
 try { process.loadEnvFile('.env.local') } catch {}
 const url=new URL(process.env.DATABASE_URL)
@@ -28,6 +29,8 @@ try {
     values ('client@payments.test.invalid','Payment Client','client',now(),'KE','30') returning id`
   const [admin]=await db`insert into users(email,full_name,role,email_verified_at,country_code,region_code)
     values ('admin@payments.test.invalid','Payment Admin','admin',now(),'KE','30') returning id`
+  const staffKey=crypto.randomBytes(32).toString('base64url')
+  await seedTestAuthenticator(db,admin.id,staffKey)
   const [project]=await db`insert into projects(client_id,title) values (${client.id},'Paystack browser check') returning id,code`
   const [invoice]=await db`insert into invoices(project_id,label,amount_kes,deposit_kes) values (${project.id},'Verification',10000,4000) returning id,code`
   const reference=`av-test-${crypto.randomUUID()}`
@@ -35,11 +38,12 @@ try {
     values (${reference},${invoice.id},${client.id},'client@payments.test.invalid','test',400000,'deposit','pending','Payment requires staff reconciliation.')`
   const token=crypto.randomBytes(32).toString('hex'),adminToken=crypto.randomBytes(32).toString('hex')
   for (const [value,user] of [[token,client.id],[adminToken,admin.id]])
-    await db`insert into sessions(id,user_id,expires_at) values (${crypto.createHash('sha256').update(value).digest('hex')},${user},now()+interval '1 day')`
+    await db`insert into sessions(id,user_id,expires_at,mfa_verified_at)
+      values (${crypto.createHash('sha256').update(value).digest('hex')},${user},now()+interval '1 day',${user===admin.id ? new Date() : null})`
   server=spawn(process.execPath,['node_modules/next/dist/bin/next','start','-p',String(port)],{
     windowsHide:true,stdio:['ignore','pipe','pipe'],env:{...process.env,DATABASE_URL:url.toString(),NEXT_DIST_DIR:'.next-paystack',APP_URL:origin,
       PAYSTACK_ENABLED:'true',PAYSTACK_MODE:'test',PAYSTACK_SECRET_KEY:'sk_test_browser_fixture',PAYSTACK_ACTOR_ID:admin.id,PAYSTACK_CHANNELS:'card,mobile_money',
-      RESEND_API_KEY:'',WORKER_SECRET:'',CRON_SECRET:'',WORKER_USER_ID:''},
+      RESEND_API_KEY:'',WORKER_SECRET:'',CRON_SECRET:'',WORKER_USER_ID:'',STAFF_MFA_KEY:staffKey},
   })
   const record=data => {log+=data.toString();fs.writeFileSync(path.join(results,'server.log'),log)}
   server.stdout.on('data',record);server.stderr.on('data',record)

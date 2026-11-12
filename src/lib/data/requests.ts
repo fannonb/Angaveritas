@@ -1,4 +1,5 @@
 import 'server-only'
+import { analystRequestScope } from './projects'
 import { sql } from '@/lib/db'
 import type { RequestStatus } from '@/lib/labels'
 import type { QuoteResult } from '@/lib/pricing/engine'
@@ -95,12 +96,6 @@ export async function createRequest(r: NewRequest) {
   return row
 }
 
-export async function recentRequestsFromIp(ipHash: string, minutes: number) {
-  const [row] = await sql<{ n: number }[]>`
-    select count(*)::int as n from requests where ip_hash = ${ipHash} and created_at > now() - make_interval(mins => ${minutes})`
-  return row.n
-}
-
 const withClient = () => sql`
   select r.*, c.full_name as client_name, c.email as client_email, c.phone as client_phone, c.based_in as client_based_in,
     o.full_name as owner_name, p.id as project_id, p.code as project_code, pp.code as parent_project_code
@@ -119,26 +114,29 @@ export async function getRequestForClient(reference: string, clientId: string) {
   return row ?? null
 }
 
-export async function getRequestByReference(reference: string) {
-  const [row] = await sql<RequestWithClient[]>`${withClient()} where r.reference = ${reference}`
+export async function getRequestByReference(reference: string, analystId?: string) {
+  const [row] = await sql<RequestWithClient[]>`${withClient()} where r.reference = ${reference}
+    and ${analystId ? analystRequestScope(analystId) : sql`true`}`
   return row ?? null
 }
 
-export async function getRequestById(id: string) {
+export async function getRequestById(id: string, analystId?: string) {
   if (!/^[0-9a-f-]{36}$/i.test(id)) return null
-  const [row] = await sql<RequestWithClient[]>`${withClient()} where r.id = ${id}`
+  const [row] = await sql<RequestWithClient[]>`${withClient()} where r.id = ${id}
+    and ${analystId ? analystRequestScope(analystId) : sql`true`}`
   return row ?? null
 }
 
 export const openRequestStatuses: RequestStatus[] = ['submitted', 'in_review', 'proposal_sent']
 
-export async function listRequests(opts: { status?: RequestStatus | 'open' | 'all'; search?: string; clientId?: string; owner?: 'unassigned' | 'me'; viewerId?: string }) {
+export async function listRequests(opts: { status?: RequestStatus | 'open' | 'all'; search?: string; clientId?: string; owner?: 'unassigned' | 'me'; viewerId?: string; analystId?: string }) {
   const status = opts.status ?? 'open'
   const q = opts.search?.trim() ? `%${opts.search.trim().replace(/[%_]/g, '')}%` : null
   return sql<RequestWithClient[]>`
     ${withClient()}
     where ${status === 'all' ? sql`true` : status === 'open' ? sql`r.status in ${sql(openRequestStatuses)}` : sql`r.status = ${status}`}
       and ${opts.clientId ? sql`r.client_id = ${opts.clientId}` : sql`true`}
+      and ${opts.analystId ? analystRequestScope(opts.analystId) : sql`true`}
       and ${opts.owner === 'unassigned' ? sql`r.owner_id is null` : opts.owner === 'me' && opts.viewerId ? sql`r.owner_id = ${opts.viewerId}` : sql`true`}
       and ${q ? sql`(r.reference ilike ${q} or r.title ilike ${q} or c.full_name ilike ${q} or c.email ilike ${q} or r.location_label ilike ${q})` : sql`true`}
     order by case r.priority when 'high' then 0 when 'normal' then 1 else 2 end, r.created_at desc

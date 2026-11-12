@@ -12,6 +12,7 @@ export async function GET(req: Request) {
   const lat = coordinate(sp.get('lat'))
   const lng = coordinate(sp.get('lng'))
   if (!inKenya(lat, lng)) return json({ error: 'Choose a point in Kenya.' }, 400)
+  if (await rateLimited('geocoding:global', 300, 60_000, 2)) return json({ error: 'Place lookup is busy. Please try again in a minute.' }, 429)
 
   const { place, answered } = await reverseLookup(lat, lng)
   // Both upstreams down: the client keeps the coordinates it already has.

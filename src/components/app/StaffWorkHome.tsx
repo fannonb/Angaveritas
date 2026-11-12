@@ -386,13 +386,13 @@ export default async function StaffWorkHome({ searchParams: promise }: { searchP
   }
   const team = query.view === 'team' || (admin && query.view !== 'mine')
   const [myTasks, teamTasks, stats, health, stages, visits, threads, notes] = await Promise.all([
-    manager ? staffWorkQueue(user.id, false) : [],
-    manager ? staffWorkQueue(user.id, true) : [],
+    manager ? staffWorkQueue(user.id, false, true) : [],
+    manager ? staffWorkQueue(user.id, true, true) : [],
     manager ? staffStats() : null,
     manager ? projectHealthCounts() : null,
-    manager ? projectStageCounts() : null,
-    upcomingInspections(manager ? undefined : user.id),
-    manager ? threadsAwaitingReply() : [],
+    manager ? projectStageCounts(user.id) : null,
+    upcomingInspections(manager ? undefined : user.id, manager ? user.id : undefined),
+    manager ? threadsAwaitingReply(user.id) : [],
     unreadNotifications(user.id, 5),
   ])
   const tasks = team ? teamTasks : myTasks

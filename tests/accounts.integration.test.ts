@@ -5,16 +5,36 @@ import postgres from 'postgres'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 
 vi.mock('server-only', () => ({}))
-const state = vi.hoisted(() => ({ sql: undefined as unknown as ReturnType<typeof postgres> }))
+const state = vi.hoisted(() => ({ sql: undefined as unknown as ReturnType<typeof postgres>, cookies: new Map<string, string>() }))
 vi.mock('@/lib/db', () => ({ get sql() { return state.sql } }))
-vi.mock('next/headers', () => ({ cookies: async () => ({ set() {} }), headers: async () => new Headers() }))
+vi.mock('next/headers', () => ({
+  cookies: async () => ({
+    get: (key: string) => ({ value: state.cookies.get(key) }),
+    set: (key: string, value: string) => state.cookies.set(key, value),
+    delete: (key: string) => state.cookies.delete(key),
+  }),
+  headers: async () => new Headers(),
+}))
 import { createClientAccount, createStaffAccount, getUserById, updateProfile, setDisabled, setPassword } from '@/lib/data/users'
 import { consumeToken, issueToken, peekToken, resetPasswordWithToken, tokenRecentlyIssued } from '@/lib/auth/tokens'
-import { createSession, loginBlocked, recordLogin } from '@/lib/auth/session'
+import { createSession, finishStaffSignIn, getUser, loginBlocked, pendingStaffSignIn, recordLogin } from '@/lib/auth/session'
+import { enrollStaffMfa, staffMfaSetup } from '@/lib/auth/mfa'
+import { hashPassword } from '@/lib/auth/password'
+import { rateLimited } from '@/lib/request'
 
 const schema = `av_test_accounts_${Date.now()}`
 const sha = (s: string) => crypto.createHash('sha256').update(s).digest('hex')
 const client = (email: string) => createClientAccount({ email, fullName: 'Account Test', phone: '+254700000000', passwordHash: 'original-hash', countryCode: 'KE', regionCode: '30' })
+
+function authenticatorCode(encoded: string, step: number) {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'
+  const bits = [...encoded].map(char => alphabet.indexOf(char).toString(2).padStart(5, '0')).join('')
+  const key = Buffer.from((bits.match(/.{8}/g) ?? []).map(byte => Number.parseInt(byte, 2)))
+  const counter = Buffer.alloc(8)
+  counter.writeBigUInt64BE(BigInt(step))
+  const mac = crypto.createHmac('sha1', key).update(counter).digest()
+  return String((mac.readUInt32BE(mac[19] & 15) & 0x7fff_ffff) % 1_000_000).padStart(6, '0')
+}
 
 describe.skipIf(process.env.RUN_DATABASE_TESTS !== '1')('account concurrency and recovery boundaries', () => {
   beforeAll(async () => {
@@ -103,6 +123,53 @@ describe.skipIf(process.env.RUN_DATABASE_TESTS !== '1')('account concurrency and
     await issueToken(id, 'reset_password')
     expect(await tokenRecentlyIssued(id, 'reset_password')).toBe(true)
     expect(await tokenRecentlyIssued(id, 'verify_email')).toBe(false)
+  })
+  it('atomically activates the mailbox owner and revokes an old registration session', async () => {
+    const id = (await client('verify-owner@accounts.invalid'))!
+    await expect(createSession({ id, role: 'client' })).rejects.toThrow('Confirm your email')
+    await state.sql`insert into sessions(id,user_id,expires_at) values ('legacy-signup-session',${id},now()+interval '1 day')`
+    const links = await Promise.all(Array.from({ length: 4 }, () => issueToken(id, 'verify_email', true)))
+    expect(links.filter(Boolean)).toHaveLength(1)
+    const token = links.find(Boolean)!
+    expect(await resetPasswordWithToken(token, 'verify_email', 'mailbox-owner-hash')).toBe(id)
+    expect(await resetPasswordWithToken(token, 'verify_email', 'replayed-hash')).toBeNull()
+    expect(await getUserById(id)).toMatchObject({ password_hash: 'mailbox-owner-hash', email_verified_at: expect.any(Date) })
+    expect(await state.sql`select id from sessions where user_id=${id}`).toHaveLength(0)
+  })
+  it('requires a fresh authenticator code before a staff session can access the app', async () => {
+    vi.stubEnv('STAFF_MFA_KEY', Buffer.alloc(32, 7).toString('base64url'))
+    const id = (await createStaffAccount({ email: 'mfa@accounts.invalid', fullName: 'MFA Fixture', role: 'analyst' }))!
+    const password = 'synthetic-staff-password'
+    const hash = await hashPassword(password)
+    await setPassword(id, hash)
+    const token = await issueToken(id, 'staff_mfa_setup')
+    const { secret } = (await staffMfaSetup(token))!
+    const step = Math.floor(Date.now() / 30_000)
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(step * 30_000 + 1)
+    try {
+      const setupCode = authenticatorCode(secret, step - 1)
+      expect(await enrollStaffMfa(token, 'wrong-password', setupCode)).toBe(false)
+      expect(await enrollStaffMfa(token, password, setupCode)).toBe(true)
+      expect(await staffMfaSetup(token)).toBeNull()
+      await expect(createSession({ id, role: 'analyst' }, hash)).rejects.toThrow('requires an authenticator')
+      await createSession({ id, role: 'analyst' }, hash, true)
+      expect(await getUser()).toBeNull()
+      expect(await pendingStaffSignIn()).toMatchObject({ user_id: id })
+      expect(await finishStaffSignIn(setupCode)).toBe(false)
+      expect(await finishStaffSignIn(authenticatorCode(secret, step))).toBe(true)
+      expect(await getUser()).toMatchObject({ id, role: 'analyst' })
+      expect(await pendingStaffSignIn()).toBeNull()
+      await createSession({ id, role: 'analyst' }, hash, true)
+      expect(await finishStaffSignIn(authenticatorCode(secret, step))).toBe(false)
+    } finally {
+      state.cookies.clear()
+      clock.mockRestore()
+      vi.unstubAllEnvs()
+    }
+  })
+  it('reserves the shared rate limit before work even under concurrent calls', async () => {
+    const blocked = await Promise.all(Array.from({ length: 12 }, () => rateLimited('weighted-test', 15, 60_000, 3)))
+    expect(blocked.filter(result => !result)).toHaveLength(5)
   })
   it('cannot issue a session after credentials change or access is disabled', async () => {
     const id = (await client('session-race@accounts.invalid'))!

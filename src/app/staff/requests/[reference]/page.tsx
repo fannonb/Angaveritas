@@ -54,7 +54,7 @@ function defaultsFromRequest(r: RequestWithClient): ProposalDefaults {
 export default async function StaffRequest({ params: paramsPromise }: { params: Promise<{ reference: string }> }) {
   const params = await paramsPromise
   const user = await requireStaff(['analyst', 'admin'])
-  const r = await getRequestByReference(params.reference)
+  const r = await getRequestByReference(params.reference, user.role === 'analyst' ? user.id : undefined)
   if (!r) notFound()
   const [proposals, messages, events, staff] = await Promise.all([listProposals(r.id), listMessages({ requestId: r.id }, true), requestEvents(r.id, false), listAssignableStaff()])
   await markRead({ requestId: r.id }, user.id)

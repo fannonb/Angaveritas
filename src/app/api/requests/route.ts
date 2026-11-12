@@ -3,12 +3,12 @@ import { registerClient, signInWithPassword } from '@/lib/auth/account'
 import { getUser, isStaff, type SessionUser } from '@/lib/auth/session'
 import { sql } from '@/lib/db'
 import { getActivePricing } from '@/lib/data/pricing'
-import { createRequest, recentRequestsFromIp } from '@/lib/data/requests'
+import { createRequest } from '@/lib/data/requests'
 import { sendEmail } from '@/lib/email'
 import { inKenya, roadDistance } from '@/lib/geo'
 import { computeQuote, formatKes, PricingError, type QuoteResult } from '@/lib/pricing/engine'
 import type { ComplexityAnswers } from '@/lib/pricing/questions'
-import { clientIp, hashIp, json, sameOrigin } from '@/lib/request'
+import { clientIp, hashIp, json, rateLimited, sameOrigin } from '@/lib/request'
 import { requestSubmitSchema } from '@/lib/validation'
 
 // Submits a request from the calculator. Signs the visitor in (or creates
@@ -16,6 +16,10 @@ import { requestSubmitSchema } from '@/lib/validation'
 // the active pricing version; numbers sent by the browser are never trusted.
 export async function POST(req: Request) {
   if (!sameOrigin(req)) return json({ error: 'Invalid request.' }, 403)
+  const ipHash = hashIp(clientIp(req))
+  if (await rateLimited(`requests:${ipHash}`, 15, 3_600_000) || await rateLimited('requests:global', 300, 3_600_000)) {
+    return json({ error: 'Too many requests. Please try again later.' }, 429)
+  }
   let body: unknown
   try {
     body = await req.json()
@@ -30,8 +34,6 @@ export async function POST(req: Request) {
   const data = parsed.data
   if (data.website) return json({ ok: true, url: '/' }) // bot
 
-  const ipHash = hashIp(clientIp(req))
-  if ((await recentRequestsFromIp(ipHash, 60)) >= 10) return json({ error: 'Too many requests from your connection. Please try again later or email us.' }, 429)
   if (data.location && !inKenya(data.location.lat, data.location.lng)) return json({ error: 'Please choose a location in Kenya.', field: 'location' }, 422)
   if (data.additionalLocations?.some(p => !inKenya(p.lat,p.lng))) return json({error:'All sites must be in Kenya.'},422)
   if (data.siteCount && data.answers) data.answers[0] = data.siteCount === 1 ? 1 : data.siteCount <= 3 ? 2 : 3
@@ -41,10 +43,13 @@ export async function POST(req: Request) {
   if (!user) {
     if (!data.account) return json({ error: 'Please create an account or sign in to submit.', field: 'account' }, 401)
     let result
-    try { result =
-      data.account.mode === 'register'
-        ? await registerClient(data.account)
-        : await signInWithPassword(data.account.email, data.account.password)
+    try {
+      if (data.account.mode === 'register') {
+        const registration = await registerClient(data.account)
+        if (!registration.ok) return json({ error: registration.error, field: `account.${registration.field ?? ''}` }, 422)
+        return json({ verificationRequired: true }, 202)
+      }
+      result = await signInWithPassword(data.account.email, data.account.password, true)
     } catch (error) {
       console.error('[account] request authentication failed', { code: (error as { code?: string }).code })
       return json({ error: 'We could not complete sign-in right now. Please try again shortly.', field: 'account' }, 503)
@@ -57,6 +62,8 @@ export async function POST(req: Request) {
   }
   if (!user) return json({ error: 'Please sign in again.' }, 401)
   if (isStaff(user)) return json({ error: 'Staff accounts cannot submit client requests. Sign in with a client account.' }, 403)
+  if (!user.email_verified_at) return json({ error: 'Confirm your email before submitting a request.' }, 403)
+  if (await rateLimited(`requests:user:${user.id}`, 10, 3_600_000)) return json({ error: 'Too many requests. Please try again later.' }, 429)
 
   // Follow-up on an existing project
   let parentProjectId: string | null = null
@@ -70,6 +77,10 @@ export async function POST(req: Request) {
   let result: QuoteResult | null = null
   let distance: { oneWayKm: number; roundTripKm: number; method: 'road' | 'estimate' | 'none' } | null = null
   if (data.kind === 'estimate') {
+    const lookups = Number(Boolean(data.location)) + (data.additionalLocations?.length ?? 0)
+    if (lookups && await rateLimited('routing:global', 300, 60_000, lookups)) {
+      return json({ error: 'Distance lookup is busy. Please try again in a minute.' }, 429)
+    }
     distance = data.location ? await roadDistance(pricing.config.origin, data.location) : { oneWayKm: 0, roundTripKm: 0, method: 'none' }
     const additional = await Promise.all((data.additionalLocations ?? []).map(p => roadDistance(pricing.config.origin,p)))
     try {

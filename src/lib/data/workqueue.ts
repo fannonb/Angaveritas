@@ -1,10 +1,12 @@
 import 'server-only'
 import { sql } from '@/lib/db'
+import { analystProjectScope, analystRequestScope } from './projects'
 
 export type WorkTask = { key: string; label: string; task: string; owner: string | null; due_on: string | null; waiting_on: string; href: string; assigned_to: string | null; review: boolean; priority: number }
 
 /** Actionable work with an owner and a real destination. Personal view includes eligible independent QA. */
-export async function staffWorkQueue(userId: string, team: boolean) {
+export async function staffWorkQueue(userId: string, team: boolean, analystOnly = false) {
+  const projectScope = analystOnly ? analystProjectScope(userId) : sql`true`
   return sql<WorkTask[]>`select * from (
     select 'request:'||r.id as key,r.reference||' · '||r.title as label,
       case when r.status='submitted' then 'Review enquiry and prepare proposal'
@@ -15,6 +17,7 @@ export async function staffWorkQueue(userId: string, team: boolean) {
     from requests r left join users u on u.id=r.owner_id
       left join lateral (select pr.decline_reason from proposals pr where pr.request_id=r.id and pr.status='declined' order by pr.version desc limit 1) d on true
     where r.status in ('submitted','in_review','declined')
+      and ${analystOnly ? analystRequestScope(userId) : sql`true`}
     union all
     select 'prepare:'||p.id,p.code||' · '||p.title,
       case when p.lead_analyst_id is null or p.field_agent_id is null then 'Assign the work team'
@@ -34,6 +37,7 @@ export async function staffWorkQueue(userId: string, team: boolean) {
       p.lead_analyst_id,false,3
     from projects p join work_orders w on w.id=p.active_work_order_id left join users u on u.id=p.lead_analyst_id
     where p.stage in ('onboarding','planning') and not exists(select 1 from inspections i where i.project_id=p.id and i.work_order_id=p.active_work_order_id and i.status<>'cancelled')
+      and ${projectScope}
     union all
     select 'visit:'||i.id,p.code||' · '||i.title,
       case when i.status='submitted' then 'Review visit findings and evidence' when i.scheduled_for<current_date then 'Reschedule or complete overdue visit' else 'Complete site visit' end,
@@ -42,6 +46,7 @@ export async function staffWorkQueue(userId: string, team: boolean) {
       case when i.status='submitted' or i.scheduled_for<current_date then 1 else 3 end
     from inspections i join projects p on p.id=i.project_id left join users u on u.id=i.agent_id
     where i.status in ('scheduled','in_progress','submitted') and p.stage<>'closed'
+      and ${projectScope}
       and (i.status<>'submitted' or ${team} or exists(select 1 from users where id=${userId} and role='admin') or inspection_reviewer_independent(i.id,${userId}))
     union all
     select 'report:'||r.id,p.code||' · '||r.title,
@@ -50,10 +55,11 @@ export async function staffWorkQueue(userId: string, team: boolean) {
       '/staff/projects/'||p.code||'/reports/'||r.id,case when r.status='in_review' then null::uuid else r.author_id end,r.status='in_review',1
     from reports r join projects p on p.id=r.project_id left join users u on u.id=r.author_id
     where r.status in ('draft','in_review') and (r.status='draft' or ${team} or exists(select 1 from users where id=${userId} and role='admin'))
+      and ${projectScope}
     union all
     select 'payment:'||n.id,p.code||' · '||p.title,'Reconcile payment reference '||n.reference,'Admin',null::text,'Admin',
       '/staff/projects/'||p.code||'?tab=operations',null::uuid,true,1
-    from payment_notices n join projects p on p.id=n.project_id left join users u on u.id=p.lead_analyst_id where n.status='pending'
+    from payment_notices n join projects p on p.id=n.project_id left join users u on u.id=p.lead_analyst_id where n.status='pending' and ${projectScope}
     union all
     select 'collect:'||p.id,p.code||' · '||p.title,'Collect KES '||b.unpaid_kes::text||' still owed',u.full_name,b.oldest_due::text,'Client',
       '/staff/projects/'||p.code||'?tab=operations',p.lead_analyst_id,false,2
@@ -67,20 +73,21 @@ export async function staffWorkQueue(userId: string, team: boolean) {
       ) x where x.amount > 0
     ) b
     where p.stage in ('analysis','delivered','monitoring') and p.payment_status in ('deposit_received','paid') and b.unpaid_kes > 0 and not exists(select 1 from payment_notices n where n.project_id=p.id and n.status='pending')
+      and ${projectScope}
     union all
     select 'refund:'||i.id,p.code||' · '||i.code,'Arrange refund of KES '||(b.paid-i.amount_kes)::text,'Admin',null::text,'Admin',
       '/staff/projects/'||p.code||'?tab=operations#record-payment',null::uuid,true,1
     from invoices i join projects p on p.id=i.project_id left join users u on u.id=p.lead_analyst_id
     cross join lateral (select coalesce(sum(case when kind='payment' then amount_kes else -amount_kes end),0) paid from payments where invoice_id=i.id) b
-    where i.status='issued' and b.paid>i.amount_kes
+    where i.status='issued' and b.paid>i.amount_kes and ${projectScope}
     union all
     select 'service:'||s.id,p.code||' · '||p.title,'Respond to '||replace(s.kind,'_',' '),u.full_name,null::text,'Analyst',
       '/staff/projects/'||p.code||'?tab=settings',p.lead_analyst_id,false,1
-    from service_requests s join projects p on p.id=s.project_id left join users u on u.id=p.lead_analyst_id where s.status='requested' and s.kind<>'cancellation'
+    from service_requests s join projects p on p.id=s.project_id left join users u on u.id=p.lead_analyst_id where s.status='requested' and s.kind<>'cancellation' and ${projectScope}
     union all
     select 'write:'||p.id,p.code||' · '||p.title,'Write report from reviewed findings',u.full_name,p.due_date::text,'Analyst',
       '/staff/projects/'||p.code||'?tab=reports',p.lead_analyst_id,false,2
-    from projects p left join users u on u.id=p.lead_analyst_id where p.stage<>'closed'
+    from projects p left join users u on u.id=p.lead_analyst_id where p.stage<>'closed' and ${projectScope}
       and exists(select 1 from inspections i where i.project_id=p.id and i.work_order_id=p.active_work_order_id and i.status='reviewed')
       and not exists(select 1 from inspections i where i.project_id=p.id and i.work_order_id=p.active_work_order_id and i.status in ('scheduled','in_progress','submitted'))
       and not exists(select 1 from reports r where r.project_id=p.id and r.work_order_id=p.active_work_order_id and r.status in ('draft','in_review','published'))
@@ -88,12 +95,13 @@ export async function staffWorkQueue(userId: string, team: boolean) {
     select 'case:'||c.id,p.code||' · '||c.title,c.title,coalesce(u.full_name,'Team'),c.due_on::text,
       case when c.status='awaiting_client' then 'Client' when c.kind in ('cancellation','scope_change') then 'Admin' else 'Analyst' end,
       '/staff/projects/'||p.code||'?tab=settings',case when c.kind in ('cancellation','scope_change') then null::uuid else c.assigned_to end,true,1
-    from workflow_cases c join projects p on p.id=c.project_id left join users u on u.id=c.assigned_to where c.status in ('open','awaiting_client','accepted')
+    from workflow_cases c join projects p on p.id=c.project_id left join users u on u.id=c.assigned_to where c.status in ('open','awaiting_client','accepted') and ${projectScope}
     union all
     select 'cycle:'||c.id,p.code||' · Monitoring cycle','Paid cycle ready to schedule',u.full_name,c.cycle_on::text,'Analyst',
       '/staff/projects/'||p.code||'?tab=monitoring',p.lead_analyst_id,false,1
     from monitoring_cycles c join projects p on p.id=c.project_id join invoices inv on inv.id=c.invoice_id left join users u on u.id=p.lead_analyst_id
     where c.inspection_id is null and inv.status='issued' and p.monitoring_status='active'
+      and ${projectScope}
       and inv.deposit_kes<=coalesce((select sum(case when kind='payment' then amount_kes else -amount_kes end) from payments where invoice_id=inv.id),0)
   ) q where ${team ? sql`true` : sql`((assigned_to=${userId} or review) and (waiting_on<>'Admin' or exists(select 1 from users where id=${userId} and role='admin')))`}
   order by (waiting_on='Client'), priority, due_on nulls last,label limit 100`

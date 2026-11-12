@@ -1,7 +1,7 @@
 import 'server-only'
 import { sql, withActor } from '@/lib/db'
 import type { ReportStatus } from '@/lib/labels'
-import type { ProjectView } from './projects'
+import { analystProjectScope, type ProjectView } from './projects'
 import type { FindingRow } from './inspections'
 import type { FileRow } from './files'
 import { reportContentProblems } from '@/lib/workflow'
@@ -167,9 +167,10 @@ export async function rateReport(id: string, projectId: string, rating: number, 
     where id = ${id} and project_id = ${projectId} and status = 'published' and work_order_unlocked(work_order_id)`
 }
 
-export async function reportsAwaitingReview() {
+export async function reportsAwaitingReview(analystId?: string) {
   return sql<(ReportRow & { project_code: string; project_title: string })[]>`
     select x.*, p.code as project_code, p.title as project_title
     from (${base()} where r.status = 'in_review') x join projects p on p.id = x.project_id
+    where ${analystId ? analystProjectScope(analystId) : sql`true`}
     order by x.submitted_at`
 }

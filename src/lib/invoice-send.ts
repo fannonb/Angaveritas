@@ -1,7 +1,7 @@
 import 'server-only'
 import { sql } from '@/lib/db'
 import { logEvent } from '@/lib/activity'
-import { appUrl, sendEmail } from '@/lib/email'
+import { sendEmail } from '@/lib/email'
 import { invoiceDocument } from '@/lib/data/invoices'
 import { invoicePdf } from '@/lib/invoice-pdf'
 import { site } from '@/lib/site'
@@ -20,13 +20,13 @@ export async function emailInvoice(invoiceId: string, projectId: string, actorId
   const inv = await invoiceDocument(invoiceId, projectId)
   if (!inv || inv.status === 'cancelled') return
   const first = inv.client.name.split(' ')[0]
-  const link = `${appUrl()}/portal/projects/${inv.project.code}?tab=operations`
+  const actionPath = `/portal/projects/${inv.project.code}?tab=operations`
   const { mpesaPaybill, bankDetails } = site.payment
   const howToPay = inv.balanceKes > 0
-    ? ['How to pay:', paystackEnabled() ? `  Pay your deposit or balance securely through your portal: ${link}` : '',
+    ? ['How to pay:', paystackEnabled() ? '  Pay your deposit or balance securely through your portal.' : '',
        mpesaPaybill ? `  M-Pesa Paybill ${mpesaPaybill}, account ${inv.code}` : '', bankDetails ? `  Bank transfer: ${bankDetails}, reference ${inv.code}` : '',
        !paystackEnabled() && !mpesaPaybill && !bankDetails ? '  Your analyst will send payment details. Pay only through official AngaVeritas channels.' : '',
-       `For payments made outside portal checkout, send us the transaction reference under Payments: ${link}`].filter(Boolean)
+       'For payments made outside portal checkout, send us the transaction reference under Payments.'].filter(Boolean)
     : []
   const due = inv.dueOn ? ` by ${date(inv.dueOn)}` : ''
   const overdue = !!inv.dueOn && new Date(`${inv.dueOn}T23:59:59+03:00`) < new Date()
@@ -81,6 +81,7 @@ export async function emailInvoice(invoiceId: string, projectId: string, actorId
     to: inv.client.email,
     copyTeam: true,
     subject,
+    actionPath,
     text: [...lines, ...(inv.revision > 1 ? ['', `Invoice revision ${inv.revision}: ${inv.revisionReason}`] : []), ...(inv.creditKes > 0 ? [`Overpaid: ${money(inv.creditKes)}. Your analyst will arrange a refund; no further payment is needed.`] : [])].filter((l, i, a) => l !== '' || a[i - 1] !== '').join('\n'),
     attachments: [{ filename: `AngaVeritas-${inv.code}.pdf`, content: await invoicePdf(inv) }],
   })

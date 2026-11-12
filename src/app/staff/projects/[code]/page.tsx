@@ -51,7 +51,7 @@ export default async function StaffProject({ params: paramsPromise, searchParams
   const tab: Tab = allowed.includes(wanted) ? wanted : allowed[0]
 
   const [inspections, contacts, evidence, clientDocs, internal, reportFiles, reports, messages, events, staff, unpaid] = await Promise.all([
-    listInspections(p.id),
+    listInspections(p.id, user.role === 'field_agent' ? user.id : undefined),
     listContacts(p.id),
     listProjectFiles(p.id, { clientView: false, category: 'evidence', fieldAgentId: user.role === 'field_agent' ? user.id : undefined }),
     listProjectFiles(p.id, { clientView: false, category: 'client_document', fieldAgentId: user.role === 'field_agent' ? user.id : undefined }),

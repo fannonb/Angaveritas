@@ -1,5 +1,6 @@
 import 'server-only'
 import { sql } from '@/lib/db'
+import { analystProjectScope } from './projects'
 
 export type MessageRow = {
   id: string
@@ -86,7 +87,7 @@ export async function clientLatestUnreadHref(clientId: string) {
 }
 
 /** Threads where the client wrote last and the team hasn't replied: the staff inbox. */
-export async function threadsAwaitingReply() {
+export async function threadsAwaitingReply(analystId?: string) {
   return sql<{ thread: string; project_id: string | null; request_id: string | null; label: string; project_stage: string | null; client_name: string; last_at: Date; body: string; href: string }[]>`
     with last as (
       select distinct on (coalesce(m.conversation_project_id, m.request_id))
@@ -105,6 +106,7 @@ export async function threadsAwaitingReply() {
     left join projects p on p.id = l.project_id
     left join requests r on r.id = l.request_id
     where u.role = 'client'
+      and ${analystId ? sql`(p.id is null or ${analystProjectScope(analystId)})` : sql`true`}
       and not exists (select 1 from reply_dismissals d
         where d.thread = case when l.project_id is not null then 'p:' || l.project_id else 'r:' || l.request_id end
           and d.last_message_at >= date_trunc('milliseconds', l.created_at)) -- JavaScript dates keep milliseconds only

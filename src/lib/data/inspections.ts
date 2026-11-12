@@ -55,8 +55,12 @@ const base = () => sql`
   left join users a on a.id = i.agent_id
   left join users rv on rv.id = i.reviewed_by`
 
-export async function listInspections(projectId: string) {
-  return sql<InspectionRow[]>`${base()} where i.project_id = ${projectId} order by i.scheduled_for nulls last, i.created_at`
+export async function listInspections(projectId: string, agentId?: string) {
+  return sql<InspectionRow[]>`${base()} where i.project_id = ${projectId}
+    and ${agentId ? sql`(i.agent_id=${agentId} or (i.agent_id is null and exists (
+      select 1 from projects p where p.id=i.project_id and p.field_agent_id=${agentId}
+    )))` : sql`true`}
+    order by i.scheduled_for nulls last, i.created_at`
 }
 
 export async function getInspection(id: string) {

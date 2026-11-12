@@ -1,6 +1,7 @@
 import 'server-only'
 import { sql } from '@/lib/db'
-import { appUrl, sendEmail, teamInboxes } from '@/lib/email'
+import { sendEmail, teamInboxes } from '@/lib/email'
+import { analystProjectScope, analystRequestScope } from '@/lib/data/projects'
 
 // One trail for everything that happens: it is the audit log for staff and,
 // for events marked clientVisible, the timeline the client sees.
@@ -23,16 +24,17 @@ export async function logEvent(e: {
 
 /** In-app notification, plus an email unless email is false. */
 export async function notifyUser(userId: string, n: { title: string; body?: string; href?: string; email?: boolean }) {
-  const [u] = await sql<{ email: string; full_name: string; disabled_at: Date | null; email_updates: boolean }[]>`
-    select email, full_name, disabled_at, email_updates from users where id = ${userId}`
+  const [u] = await sql<{ email: string; full_name: string; disabled_at: Date | null; email_updates: boolean; email_verified_at: Date | null }[]>`
+    select email, full_name, disabled_at, email_updates, email_verified_at from users where id = ${userId}`
   if (!u || u.disabled_at) return
   await sql`insert into notifications (user_id, title, body, href) values (${userId}, ${n.title}, ${n.body ?? null}, ${n.href ?? null})`
-  if (n.email !== false && u.email_updates) {
+  if (n.email !== false && u.email_updates && u.email_verified_at) {
     await sendEmail({
       to: u.email,
       copyTeam: true,
       subject: n.title,
-      text: [`Hello ${u.full_name.split(' ')[0]},`, '', n.body ?? n.title, '', n.href ? `Open: ${appUrl()}${n.href}` : ''].join('\n'),
+      text: [`Hello ${u.full_name.split(' ')[0]},`, '', n.body ?? n.title].join('\n'),
+      actionPath: n.href,
     })
   }
 }
@@ -43,8 +45,20 @@ export async function notifyUser(userId: string, n: { title: string; body?: stri
  */
 export async function notifyTeam(n: { title: string; body?: string; href?: string; staffIds?: (string | null | undefined)[]; replyTo?: string }) {
   const ids = n.staffIds?.filter(Boolean) as string[] | undefined
-  const team = await sql<{ id: string; role: string }[]>`select id, role from users where role in ('analyst', 'admin') and disabled_at is null`
-  const recipients = [...new Set(ids?.length ? [...ids, ...team.filter(p => p.role === 'admin').map(p => p.id)] : team.map(p => p.id))]
+  const project = n.href?.match(/^\/staff\/projects\/(AVP-\d+)(?:[/?#]|$)/)?.[1]
+  const inspection = n.href?.match(/^\/staff\/inspections\/([a-f0-9-]{36})(?:[/?#]|$)/i)?.[1]
+  const request = n.href?.match(/^\/staff\/requests\/([^/?#]+)/)?.[1]
+  const analyst = sql`u.id`
+  const scope = project
+    ? sql`exists (select 1 from projects p where p.code=${project} and ${analystProjectScope(analyst)})`
+    : inspection
+      ? sql`exists (select 1 from projects p join inspections i on i.project_id=p.id where i.id=${inspection} and ${analystProjectScope(analyst)})`
+      : request
+        ? sql`exists (select 1 from requests r where r.reference=${request} and ${analystRequestScope(analyst)})`
+        : sql`true`
+  const team = await sql<{ id: string; role: string }[]>`select id, role from users u
+    where role in ('analyst', 'admin') and disabled_at is null and (role='admin' or ${scope})`
+  const recipients = team.filter(person => !ids?.length || person.role === 'admin' || ids.includes(person.id)).map(person => person.id)
   for (const id of new Set(recipients)) {
     await sql`insert into notifications (user_id, title, body, href) values (${id}, ${n.title}, ${n.body ?? null}, ${n.href ?? null})`
   }
@@ -57,6 +71,7 @@ export async function notifyTeam(n: { title: string; body?: string; href?: strin
     to,
     subject: n.title,
     replyTo: n.replyTo,
-    text: [n.body ?? n.title, '', n.href ? `Open: ${appUrl()}${n.href}` : ''].join('\n'),
+    text: n.body ?? n.title,
+    actionPath: n.href,
   })
 }

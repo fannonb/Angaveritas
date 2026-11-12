@@ -1,8 +1,11 @@
 import { logEvent } from '@/lib/activity'
 import { getUser } from '@/lib/auth/session'
-import { getFile, mayReadFile } from '@/lib/data/files'
+import { clearClientDocument, clientDocumentScanRequired, getFile, mayReadFile, scanningEnabled } from '@/lib/data/files'
 import { projectFor } from '@/lib/data/projects'
 import { serveObject } from '@/lib/storage'
+import { rateLimited } from '@/lib/request'
+
+export const maxDuration = 60
 
 // Serves a stored file after checking that this user may see it. Clients see
 // their own uploads and items released to them; staff see what their project
@@ -16,9 +19,15 @@ export async function GET(req: Request, { params: paramsPromise }: { params: Pro
   const access = await projectFor(user, file.project_id)
   if (!access) return new Response('Not found', { status: 404 })
   if (!(await mayReadFile(user, file))) return new Response('Not found', { status: 404 })
+  if (!access.isClient && file.category === 'client_document' && !file.scanned_at && (clientDocumentScanRequired() || scanningEnabled())) {
+    if (await rateLimited(`document-scan:${user.id}`,10,60_000)) return new Response('Too many requests. Try again in a minute.', { status: 429 })
+    if (!(await clearClientDocument(file).catch(() => false))) {
+      return new Response('This document is unavailable pending security verification.', { status: 423, headers: { 'Cache-Control': 'private, no-store' } })
+    }
+  }
 
   const download = new URL(req.url).searchParams.has('download')
-  const inline = !download && (file.mime.startsWith('image/') || file.mime.startsWith('video/') || file.mime === 'application/pdf')
+  const inline = !download && file.category !== 'client_document' && (file.mime.startsWith('image/') || file.mime.startsWith('video/') || file.mime === 'application/pdf')
   if (file.category === 'report' || download) {
     await logEvent({ actorId: user.id, projectId: file.project_id, type: 'file.downloaded', summary: `${user.full_name} opened ${file.filename}` })
   }

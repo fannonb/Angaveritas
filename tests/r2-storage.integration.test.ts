@@ -21,10 +21,12 @@ describe.skipIf(!enabled)('Cloudflare R2 storage driver (live bucket)', () => {
       const target = await uploadTarget('r2-test-file', key, body.length)
       expect(target.url).toContain('.r2.cloudflarestorage.com')
       // The approved size is signed into the link: a larger body is refused.
-      const oversized = await fetch(target.url, { method: 'PUT', body: Buffer.concat([body, body]), headers: { 'Content-Type': 'text/plain' } })
+      const oversized = await fetch(target.url, { method: 'PUT', body: Buffer.concat([body, body]), headers: { ...target.headers, 'Content-Type': 'text/plain' } })
       expect(oversized.ok).toBe(false)
-      const put = await fetch(target.url, { method: 'PUT', body, headers: { 'Content-Type': 'text/plain' } })
+      const put = await fetch(target.url, { method: 'PUT', body, headers: { ...target.headers, 'Content-Type': 'text/plain' } })
       expect(put.status).toBe(200)
+      const replay = await fetch(target.url, { method: 'PUT', body: Buffer.alloc(body.length, 'X'), headers: target.headers })
+      expect(replay.status).toBe(412)
 
       const info = await inspectObject(key)
       expect(info.size).toBe(body.length)

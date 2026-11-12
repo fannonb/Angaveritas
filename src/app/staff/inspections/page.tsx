@@ -3,6 +3,7 @@ import { InspectionChip } from '@/components/app/bits'
 import { fmtDate, relativeDays } from '@/components/app/format'
 import { requireStaff } from '@/lib/auth/session'
 import { sql } from '@/lib/db'
+import { analystProjectScope } from '@/lib/data/projects'
 import type { InspectionStatus } from '@/lib/labels'
 
 export const metadata = { title: 'Inspections' }
@@ -24,6 +25,7 @@ export default async function InspectionsPage({ searchParams: searchParamsPromis
       : sql`i.status in ('reviewed', 'cancelled')`
     }
       and ${agent ? sql`(i.agent_id = ${user.id} or (i.agent_id is null and p.field_agent_id = ${user.id}))` : sql`true`}
+      and ${user.role === 'analyst' ? analystProjectScope(user.id) : sql`true`}
     order by i.scheduled_for nulls last, i.created_at
     limit 300`
   return (

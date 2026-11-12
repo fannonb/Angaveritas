@@ -3,19 +3,21 @@ import { fmtDateTime } from '@/components/app/format'
 import { requireStaff } from '@/lib/auth/session'
 import { sql } from '@/lib/db'
 import { reportsAwaitingReview } from '@/lib/data/reports'
+import { analystProjectScope } from '@/lib/data/projects'
 
 export const metadata = { title: 'Reviews' }
 
 // Quality control queue: inspections and reports waiting for a second pair of eyes.
 export default async function ReviewsPage() {
   const user = await requireStaff(['analyst', 'admin'])
+  const analyst = user.role === 'analyst' ? user.id : undefined
   const [reports, inspections] = await Promise.all([
-    reportsAwaitingReview(),
+    reportsAwaitingReview(analyst),
     sql<{ id: string; code: string; title: string; submitted_at: Date; agent_name: string | null; agent_id: string | null; project_code: string; project_title: string; flagged: number }[]>`
       select i.id, i.code, i.title, i.submitted_at, i.agent_id, a.full_name as agent_name, p.code as project_code, p.title as project_title,
         (select count(*)::int from files f where f.inspection_id = i.id and f.integrity_flag is not null) as flagged
       from inspections i join projects p on p.id = i.project_id left join users a on a.id = i.agent_id
-      where i.status = 'submitted' order by i.submitted_at`,
+      where i.status = 'submitted' and ${analyst ? analystProjectScope(analyst) : sql`true`} order by i.submitted_at`,
   ])
   return (
     <div className="space-y-6">
