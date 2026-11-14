@@ -1,8 +1,11 @@
 import type { Metadata } from 'next'
 import Link from 'next/link'
 import { Icon } from '@/components/site/ui'
+import { SocialLinks } from '@/components/site/SocialLinks'
 import { formatPhone, site, telHref, waHref } from '@/lib/site'
 import ContactForm from './ContactForm'
+
+const hasSocial = Object.values(site.social).some(Boolean)
 
 export const metadata: Metadata = {
   title: 'Talk to an analyst',
@@ -55,6 +58,13 @@ export default async function Contact({ searchParams: searchParamsPromise }: { s
                 <div><span>Office</span><strong>{site.location}</strong></div>
               </div>
             </div>
+
+            {hasSocial && (
+              <>
+                <h2 className="h3-size mt-lg">Follow us</h2>
+                <SocialLinks variant="labelled" />
+              </>
+            )}
 
             <h2 className="h3-size mt-lg">Ready to start?</h2>
             <ol className="checklist checklist--plain">

@@ -2,6 +2,7 @@ import Link from 'next/link'
 import { formatPhone, site, telHref, waHref } from '@/lib/site'
 import { services } from '@/site/services'
 import { Icon } from './ui'
+import { SocialLinks } from './SocialLinks'
 
 export function Footer() {
   return (
@@ -11,6 +12,7 @@ export function Footer() {
           <div className="footer-brand">
             <h2>AngaVeritas</h2>
             <p>Independent ground verification and investment intelligence for people investing in Kenya.</p>
+            <SocialLinks className="footer-social" />
           </div>
           <div>
             <h2>Services</h2>

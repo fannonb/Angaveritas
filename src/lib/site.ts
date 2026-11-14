@@ -13,6 +13,13 @@ export const site = {
   // Calendly / Google Calendar booking page for consultation and report walkthrough calls.
   bookingUrl: process.env.NEXT_PUBLIC_BOOKING_URL ?? '',
 
+  // Social profiles, shown in the footer and on the contact page. Leave one empty to hide it.
+  social: {
+    linkedin: 'https://www.linkedin.com/company/angaveritas',
+    instagram: 'https://www.instagram.com/angaveritas',
+    tiktok: 'https://www.tiktok.com/@angaveritas',
+  },
+
   // How clients pay invoices, shown on the client's Billing tab. Leave empty until the details are confirmed;
   // clients are then told the details come by email. The invoice number is always the payment reference.
   payment: {
